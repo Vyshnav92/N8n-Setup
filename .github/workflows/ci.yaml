@@ -10,9 +10,8 @@ permissions:
   contents: read
 
 jobs:
-  validate-and-scan:
+  validate:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
@@ -41,16 +40,4 @@ jobs:
       - name: Validate rendered chart
         run: |
           kubeconform -strict -ignore-missing-schemas -summary rendered.yaml
-
-      - name: Scan images with Trivy
-        run: |
-          grep -E '^[[:space:]]+image:' rendered.yaml |
-            awk '{print $2}' | tr -d '"' | sort -u > images.txt
-
-          cat images.txt
-
-          while read -r img; do
-            docker run --rm aquasec/trivy:0.74.0 \
-              image --severity HIGH,CRITICAL --exit-code 0 "$img"
-          done < images.txt
 
