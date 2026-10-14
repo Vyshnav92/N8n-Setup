@@ -1,0 +1,21 @@
+queueMode:
+  enabled: true
+  workerReplicaCount: 2
+
+database:
+  useExternal: true
+  host: n8n-db-rw
+  port: 5432
+  database: n8n
+  user: n8n
+  passwordSecret:
+    name: n8n-db-app
+    key: password
+
+redis:
+  useExternal: true
+  host: redis
+  port: 6379
+
+secretRefs:
+  existingSecret: n8n-secrets
