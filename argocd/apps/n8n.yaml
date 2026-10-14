@@ -1,0 +1,30 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: n8n
+  namespace: argocd
+spec:
+  project: default
+  sources:
+    - repoURL: ghcr.io/n8n-io/n8n-helm-chart
+      chart: n8n
+      targetRevision: 1.15.0
+      helm:
+        releaseName: n8n
+        valueFiles:
+          - $values/deploy/n8n-values.yaml
+    - repoURL: git@github.com:Vyshnav92/N8n-Setup.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: n8n
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: false
+    retry:
+      limit: 5
+      backoff:
+        duration: 20s
+        factor: 2

@@ -1,0 +1,25 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: n8n-base
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: git@github.com:Vyshnav92/N8n-Setup.git
+    targetRevision: main
+    path: deploy/base
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: n8n
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: false
+    syncOptions:
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 20s
+        factor: 2
