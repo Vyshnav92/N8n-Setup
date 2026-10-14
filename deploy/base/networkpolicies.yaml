@@ -48,7 +48,11 @@ spec:
               cnpg.io/cluster: n8n-db
         - namespaceSelector:
             matchLabels:
+
               kubernetes.io/metadata.name: cnpg-system
+        - podSelector:
+            matchLabels:
+              app: pg-backup
       ports:
         - port: 5432
         - port: 8000
