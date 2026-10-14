@@ -1,0 +1,69 @@
+# 1. Deny all inbound traffic in the namespace by default
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: n8n
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+# 2. Only n8n pods may reach Redis
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-allow-n8n
+  namespace: n8n
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: n8n
+      ports:
+        - port: 6379
+---
+# 3. Postgres: n8n, its own replicas, and the CNPG operator
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-allow-n8n-and-operator
+  namespace: n8n
+spec:
+  podSelector:
+    matchLabels:
+      cnpg.io/cluster: n8n-db
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: n8n
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: n8n-db
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cnpg-system
+      ports:
+        - port: 5432
+        - port: 8000
+---
+# 4. n8n's own web port stays reachable (UI, webhooks)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: n8n-allow-web
+  namespace: n8n
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: n8n
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - port: 5678
