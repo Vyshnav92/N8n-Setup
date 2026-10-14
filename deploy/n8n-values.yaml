@@ -1,6 +1,6 @@
 queueMode:
   enabled: true
-  workerReplicaCount: 2
+  workerReplicaCount: 4
 
 database:
   useExternal: true
