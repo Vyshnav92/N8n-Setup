@@ -1,0 +1,43 @@
+
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.18.6
+
+      - name: Install kubeconform
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar xz
+          sudo mv kubeconform /usr/local/bin/
+
+      - name: Validate plain manifests
+        run: |
+          kubeconform -strict -ignore-missing-schemas -summary \
+            deploy/base argocd bootstrap
+
+      - name: Render n8n chart
+        run: |
+          helm template n8n oci://ghcr.io/n8n-io/n8n-helm-chart/n8n \
+            --version 1.15.0 \
+            -n n8n \
+            -f deploy/n8n-values.yaml > rendered.yaml
+
+      - name: Validate rendered chart
+        run: |
+          kubeconform -strict -ignore-missing-schemas -summary rendered.yaml
+
