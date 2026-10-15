@@ -19,10 +19,18 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: n8n
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas
+
   syncPolicy:
     automated:
       selfHeal: true
       prune: false
+    syncOptions:
+      - RespectIgnoreDifferences=true
     retry:
       limit: 5
       backoff:

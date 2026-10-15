@@ -2,6 +2,24 @@ queueMode:
   enabled: true
   workerReplicaCount: 3
 
+webhookProcessor:
+  enabled: true
+  replicaCount: 2
+  disableProductionWebhooksOnMainProcess: true
+
+hpa:
+  worker:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 70
+  webhookProcessor:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 60
+
+
 database:
   useExternal: true
   host: n8n-db-rw
