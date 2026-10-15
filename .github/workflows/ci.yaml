@@ -50,13 +50,15 @@ jobs:
             deploy/base argocd bootstrap
 
       # 5. Lint the n8n Helm chart and its values
-      - name: Lint n8n Helm chart
+      - name: Lint Helm chart
         run: |
-          helm lint \
-            oci://ghcr.io/n8n-io/n8n-helm-chart/n8n \
+          helm pull oci://ghcr.io/n8n-io/n8n-helm-chart/n8n \
             --version 1.15.0 \
-            -f deploy/n8n-values.yaml
+            --untar \
+            --untardir /tmp/n8n-chart
 
+          helm lint /tmp/n8n-chart/n8n \
+            -f deploy/n8n-values.yaml
       # 6. Render the chart
       - name: Render n8n chart
         run: |
