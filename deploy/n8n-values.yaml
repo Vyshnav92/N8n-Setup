@@ -41,9 +41,25 @@ database:
     key: password
 
 redis:
+  enabled: true
   useExternal: true
+
+  # Used when clusterNodes is empty
   host: redis
   port: 6379
+
+  # Password Secret in the n8n namespace
+  passwordSecret:
+    name: redis-cluster-auth
+    key: redis-password
+
+  # New Redis Cluster seed nodes
+  clusterNodes: "redis-ha-redis-cluster-0.redis-ha-redis-cluster-headless.redis-ha.svc.cluster.local:6379,redis-ha-redis-cluster-1.redis-ha-redis-cluster-headless.redis-ha.svc.cluster.local:6379,redis-ha-redis-cluster-2.redis-ha-redis-cluster-headless.redis-ha.svc.cluster.local:6379,redis-ha-redis-cluster-3.redis-ha-redis-cluster-headless.redis-ha.svc.cluster.local:6379,redis-ha-redis-cluster-4.redis-ha-redis-cluster-headless.redis-ha.svc.cluster.local:6379,redis-ha-redis-cluster-5.redis-ha-redis-cluster-headless.redis-ha.svc.cluster.local:6379"
+
+  database: 0
+  timeout: 10000
+  prefix: ""
+  tls: false
 
 secretRefs:
   existingSecret: n8n-secrets
