@@ -69,6 +69,8 @@ config:
       value: "false"
     - name: NODES_EXCLUDE
       value: '["n8n-nodes-base.executeCommand","n8n-nodes-base.readWriteFile","n8n-nodes-base.localFileTrigger","n8n-nodes-base.e2eTest","n8n-nodes-base.dynamicCredentialCheck"]'
+    - name: N8N_SSRF_PROTECTION_ENABLED
+      value: "true"
 
 # Isolate Code node execution in external runner sidecars
 taskRunners:
