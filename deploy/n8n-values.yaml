@@ -71,6 +71,28 @@ config:
       value: '["n8n-nodes-base.executeCommand","n8n-nodes-base.readWriteFile","n8n-nodes-base.localFileTrigger","n8n-nodes-base.e2eTest","n8n-nodes-base.dynamicCredentialCheck"]'
     - name: N8N_SSRF_PROTECTION_ENABLED
       value: "true"
+    - name: N8N_EMAIL_MODE
+      value: "smtp"
+    - name: N8N_SMTP_HOST
+      value: "smtp.gmail.com"
+    - name: N8N_SMTP_PORT
+      value: "465"
+    - name: N8N_SMTP_SSL
+      value: "true"
+    - name: N8N_SMTP_USER
+      valueFrom:
+        secretKeyRef:
+          name: n8n-smtp-credentials
+          key: username
+    - name: N8N_SMTP_PASS
+      valueFrom:
+        secretKeyRef:
+          name: n8n-smtp-credentials
+          key: password
+    - name: N8N_SMTP_SENDER
+      value: "vaishnavsnair39@gmail.com"
+    - name: N8N_INVITE_LINKS_EMAIL_ONLY
+      value: "true"
 
 # Isolate Code node execution in external runner sidecars
 taskRunners:
