@@ -65,6 +65,8 @@ config:
       value: "database"
     - name: N8N_ENV_FEAT_ENCRYPTION_KEY_ROTATION
       value: "true"
+    - name: N8N_DIAGNOSTICS_ENABLED
+      value: "false"
 
 # Isolate Code node execution in external runner sidecars
 taskRunners:
