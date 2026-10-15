@@ -1,0 +1,45 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pg-restore
+  namespace: n8n
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: pg-backup
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 26
+        runAsGroup: 26
+        fsGroup: 26
+      containers:
+        - name: restore
+          image: ghcr.io/cloudnative-pg/postgresql:18.6-system-trixie
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: n8n-db-app
+                  key: password
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              echo "Restoring from /backup/n8n-20261015T115802Z.dump"
+              pg_restore --clean --if-exists --no-owner -h n8n-db-rw -U n8n -d n8n /backup/n8n-20261015T115802Z.dump || echo "pg_restore exited with code $? (read the messages above)"
+              echo "Restore finished"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: backup
+              mountPath: /backup
+              readOnly: true
+      volumes:
+        - name: backup
+          persistentVolumeClaim:
+            claimName: pg-backup
