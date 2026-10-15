@@ -39,14 +39,14 @@ secretRefs:
   existingSecret: n8n-secrets
 
 webhook:
-  url: "http://localhost:8080"
+  url: "https://localhost:8443"
 
 config:
   extraEnv:
     - name: N8N_PROXY_HOPS
       value: "1"
     - name: N8N_EDITOR_BASE_URL
-      value: "http://localhost:8080"
+      value: "https://localhost:8443"
     - name: QUEUE_HEALTH_CHECK_ACTIVE
       value: "true"
     - name: EXECUTIONS_DATA_SAVE_ON_ERROR
@@ -63,3 +63,5 @@ config:
       value: "168"
     - name: EXECUTIONS_DATA_PRUNE_MAX_COUNT
       value: "50000"
+    - name: N8N_DEFAULT_BINARY_DATA_MODE
+      value: "database"
