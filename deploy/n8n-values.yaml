@@ -37,11 +37,3 @@ redis:
 
 secretRefs:
   existingSecret: n8n-secrets
-
-webhook:
-  url: "http://localhost:8080"
-
-config:
-  extraEnv:
-    - name: N8N_PROXY_HOPS
-      value: "1"
