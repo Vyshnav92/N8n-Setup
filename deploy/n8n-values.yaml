@@ -49,3 +49,17 @@ config:
       value: "http://localhost:8080"
     - name: QUEUE_HEALTH_CHECK_ACTIVE
       value: "true"
+    - name: EXECUTIONS_DATA_SAVE_ON_ERROR
+      value: "all"
+    - name: EXECUTIONS_DATA_SAVE_ON_SUCCESS
+      value: "none"
+    - name: EXECUTIONS_DATA_SAVE_ON_PROGRESS
+      value: "false"
+    - name: EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS
+      value: "false"
+    - name: EXECUTIONS_DATA_PRUNE
+      value: "true"
+    - name: EXECUTIONS_DATA_MAX_AGE
+      value: "168"
+    - name: EXECUTIONS_DATA_PRUNE_MAX_COUNT
+      value: "50000"
