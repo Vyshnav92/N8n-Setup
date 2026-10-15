@@ -47,3 +47,5 @@ config:
       value: "1"
     - name: N8N_EDITOR_BASE_URL
       value: "http://localhost:8080"
+    - name: QUEUE_HEALTH_CHECK_ACTIVE
+      value: "true"
