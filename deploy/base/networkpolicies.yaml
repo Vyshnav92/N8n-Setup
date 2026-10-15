@@ -8,26 +8,7 @@ spec:
   podSelector: {}
   policyTypes: [Ingress]
 ---
-# 2. Only n8n pods may reach Redis
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: redis-allow-n8n
-  namespace: n8n
-spec:
-  podSelector:
-    matchLabels:
-      app: redis
-  policyTypes: [Ingress]
-  ingress:
-    - from:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: n8n
-      ports:
-        - port: 6379
----
-# 3. Postgres: n8n, its own replicas, and the CNPG operator
+# 2. Postgres: n8n, its own replicas, and the CNPG operator
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -57,7 +38,7 @@ spec:
         - port: 5432
         - port: 8000
 ---
-# 4. n8n's own web port stays reachable (UI, webhooks)
+# 3. n8n's own web port stays reachable (UI, webhooks)
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
