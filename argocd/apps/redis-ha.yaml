@@ -8,10 +8,17 @@ spec:
   source:
     repoURL: registry-1.docker.io/bitnamicharts
     chart: redis-cluster
-    targetRevision: 13.0.5
+    targetRevision: 13.0.4
     helm:
       releaseName: redis-ha
       valuesObject:
+        global:
+          security:
+            allowInsecureImages: true
+        image:
+          registry: docker.io
+          repository: bitnamilegacy/redis-cluster
+          tag: 8.2.1-debian-12-r0
         usePassword: true
         existingSecret: redis-cluster-auth
         existingSecretPasswordKey: redis-password
@@ -21,8 +28,7 @@ spec:
         persistence:
           enabled: true
           size: 1Gi
-        redis:
-          resourcesPreset: nano
+        resourcesPreset: nano
   destination:
     server: https://kubernetes.default.svc
     namespace: redis-ha
