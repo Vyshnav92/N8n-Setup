@@ -66,6 +66,7 @@ spec:
       labels:
         app: nginx-proxy
     spec:
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         seccompProfile:

@@ -2,6 +2,16 @@ queueMode:
   enabled: true
   workerReplicaCount: 3
 
+# n8n workloads do not need to call the Kubernetes API
+serviceAccount:
+  automountServiceAccountToken: false
+
+# Remove the chart-created Role and RoleBinding.
+# n8n accesses PostgreSQL, Redis and Secrets through normal
+# workload configuration, not by querying the Kubernetes API.
+rbac:
+  create: false
+
 webhookProcessor:
   enabled: true
   replicaCount: 2
