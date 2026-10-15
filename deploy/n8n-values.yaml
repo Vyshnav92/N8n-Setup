@@ -67,6 +67,8 @@ config:
       value: "true"
     - name: N8N_DIAGNOSTICS_ENABLED
       value: "false"
+    - name: NODES_EXCLUDE
+      value: '["n8n-nodes-base.executeCommand","n8n-nodes-base.readWriteFile","n8n-nodes-base.localFileTrigger","n8n-nodes-base.e2eTest","n8n-nodes-base.dynamicCredentialCheck"]'
 
 # Isolate Code node execution in external runner sidecars
 taskRunners:

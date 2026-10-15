@@ -46,7 +46,7 @@ jobs:
       # 4. Validate plain Kubernetes manifests
       - name: Validate plain manifests
         run: |
-          kubeconform -strict -ignore-missing-schemas -summary -recursive \
+          kubeconform -strict -ignore-missing-schemas -summary \
             deploy/base argocd bootstrap
 
       # 5. Lint the n8n Helm chart and its values
