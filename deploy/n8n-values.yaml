@@ -65,3 +65,5 @@ config:
       value: "50000"
     - name: N8N_DEFAULT_BINARY_DATA_MODE
       value: "database"
+    - name: N8N_ENV_FEAT_ENCRYPTION_KEY_ROTATION
+      value: "true"
