@@ -65,3 +65,34 @@ config:
       value: "database"
     - name: N8N_ENV_FEAT_ENCRYPTION_KEY_ROTATION
       value: "true"
+
+# Isolate Code node execution in external runner sidecars
+taskRunners:
+  enabled: true
+  mode: external
+
+  image:
+    repository: n8nio/runners
+    tag: "2.42.4-distroless"
+
+  authToken:
+    existingSecret: n8n-runner-token
+    existingSecretKey: auth-token
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+
+# Run the task runner as the unprivileged nobody user
+containerSecurityContext:
+  taskRunner:
+    runAsUser: 65532
+    runAsGroup: 65532
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
