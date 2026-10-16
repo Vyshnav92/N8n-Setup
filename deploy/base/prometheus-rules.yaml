@@ -1,0 +1,38 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: n8n-backup-alerts
+  namespace: monitoring
+  labels:
+    release: prometheus
+spec:
+  groups:
+    - name: n8n-runtime
+      rules:
+        - alert: N8nPodCrashLooping
+          expr: 'kube_pod_container_status_waiting_reason{namespace="n8n",reason="CrashLoopBackOff"} == 1'
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "An n8n pod is crash-looping"
+            description: "Pod {{ $labels.pod }} is crash-looping."
+
+        - alert: N8nDeploymentUnavailable
+          expr: 'kube_deployment_status_replicas_unavailable{namespace="n8n",deployment=~"n8n-main|n8n-worker|n8n-webhook-processor"} > 0'
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "An n8n deployment has unavailable replicas"
+            description: "Deployment {{ $labels.deployment }} has unavailable replicas."
+
+        - alert: PostgreSQLBackupJobFailed
+          expr: 'kube_job_status_failed{namespace="n8n",job_name=~"pg-backup(-to-s3)?-.*"} > 0'
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "A PostgreSQL backup job failed"
+            description: "Backup job {{ $labels.job_name }} failed."
+
