@@ -1,0 +1,36 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pg-backup-to-s3
+  namespace: n8n
+spec:
+  schedule: "10,40 * * * *"
+  concurrencyPolicy: Forbid
+
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: upload
+              image: rclone/rclone:latest
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  rclone copy /backups s3:n8n-backup-v1/n8n-postgres \
+                    --min-age 10m \
+                    --log-level INFO
+              envFrom:
+                - secretRef:
+                    name: s3-backup
+              volumeMounts:
+                - name: backups
+                  mountPath: /backups
+                  readOnly: true
+
+          volumes:
+            - name: backups
+              persistentVolumeClaim:
+                claimName: pg-backup
