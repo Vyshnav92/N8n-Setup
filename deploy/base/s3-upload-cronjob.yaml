@@ -21,6 +21,8 @@ spec:
                   set -eu
                   rclone copy /backups s3:n8n-backup-v1/n8n-postgres \
                     --min-age 10m \
+                    --include 'n8n-*.dump' \
+                    --exclude '*' \
                     --log-level INFO
               envFrom:
                 - secretRef:
