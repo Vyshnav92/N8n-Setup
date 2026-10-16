@@ -1,0 +1,111 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monitoring
+  namespace: argocd
+spec:
+  project: default
+
+  source:
+    repoURL: https://prometheus-community.github.io/helm-charts
+    chart: kube-prometheus-stack
+    targetRevision: "92.7.0"
+    helm:
+      releaseName: monitoring
+      values: |
+        prometheus:
+          prometheusSpec:
+            retention: 3d
+            retentionSize: "1GB"
+            scrapeInterval: 30s
+            resources:
+              requests:
+                cpu: 100m
+                memory: 384Mi
+              limits:
+                cpu: 500m
+                memory: 768Mi
+
+        grafana:
+          enabled: true
+          persistence:
+            enabled: false
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+
+        alertmanager:
+          enabled: true
+          alertmanagerSpec:
+            replicas: 1
+            resources:
+              requests:
+                cpu: 50m
+                memory: 128Mi
+              limits:
+                cpu: 200m
+                memory: 256Mi
+
+        prometheusOperator:
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+
+        defaultRules:
+          rules:
+            etcd: false
+            kubeControllerManager: false
+            kubeSchedulerAlerting: false
+            kubeSchedulerRecording: false
+            kubeProxy: false
+
+        additionalPrometheusRulesMap:
+          n8n-alerts:
+            groups:
+              - name: n8n-runtime
+                rules:
+                  - alert: N8nPodCrashLooping
+                    expr: 'kube_pod_container_status_waiting_reason{namespace="n8n",reason="CrashLoopBackOff"} == 1'
+                    for: 5m
+                    labels:
+                      severity: warning
+                    annotations:
+                      summary: "An n8n pod is crash-looping"
+                      description: 'Pod {{ $labels.pod }} container {{ $labels.container }} is crash-looping.'
+
+                  - alert: N8nDeploymentUnavailable
+                    expr: 'kube_deployment_status_replicas_unavailable{namespace="n8n",deployment=~"n8n-main|n8n-worker|n8n-webhook-processor"} > 0'
+                    for: 5m
+                    labels:
+                      severity: critical
+                    annotations:
+                      summary: "An n8n deployment has unavailable replicas"
+                      description: 'Deployment {{ $labels.deployment }} has unavailable replicas.'
+
+                  - alert: BackupJobFailed
+                    expr: 'kube_job_status_failed{namespace="n8n",job_name=~"pg-backup(-to-s3)?-.*"} > 0'
+                    for: 1m
+                    labels:
+                      severity: critical
+                    annotations:
+                      summary: "A PostgreSQL backup job failed"
+                      description: 'Job {{ $labels.job_name }} has failed.'
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
