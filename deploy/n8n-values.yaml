@@ -83,6 +83,14 @@ executions:
 
 config:
   extraEnv:
+    - name: N8N_METRICS
+      value: "true"
+    - name: N8N_METRICS_INCLUDE_QUEUE_METRICS
+      value: "true"
+    - name: N8N_METRICS_INCLUDE_WORKFLOW_ID_LABEL
+      value: "true"
+    - name: N8N_METRICS_INCLUDE_NODE_TYPE_LABEL
+      value: "true"
     - name: N8N_PROXY_HOPS
       value: "1"
     - name: QUEUE_HEALTH_CHECK_ACTIVE
