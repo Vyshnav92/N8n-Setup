@@ -1,0 +1,10 @@
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: redis-cluster-auth
+  namespace: n8n
+spec:
+  secretTargetRef:
+    - parameter: password
+      name: redis-cluster-auth
+      key: redis-password
