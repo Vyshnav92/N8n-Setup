@@ -19,7 +19,7 @@ webhookProcessor:
 
 hpa:
   worker:
-    enabled: true
+    enabled: false
     minReplicas: 2
     maxReplicas: 4
     targetCPUUtilizationPercentage: 70
@@ -158,3 +158,19 @@ containerSecurityContext:
     capabilities:
       drop:
         - ALL
+
+keda:
+  enabled: true
+  worker:
+    pollingInterval: 15
+    cooldownPeriod: 300
+    minReplicaCount: 2
+    maxReplicaCount: 4
+    triggers:
+      - type: redis-cluster
+        metadata:
+          addresses: "redis-ha-redis-cluster-0.redis-ha-redis-cluster-headless.redis-ha.svc.cluster.local:6379,redis-ha-redis-cluster-1.redis-ha-redis-cluster-headless.redis-ha.svc.cluster.local:6379,redis-ha-redis-cluster-2.redis-ha-redis-cluster-headless.redis-ha.svc.cluster.local:6379,redis-ha-redis-cluster-3.redis-ha-redis-cluster-headless.redis-ha.svc.cluster.local:6379,redis-ha-redis-cluster-4.redis-ha-redis-cluster-headless.redis-ha.svc.cluster.local:6379,redis-ha-redis-cluster-5.redis-ha-redis-cluster-headless.redis-ha.svc.cluster.local:6379"
+          listName: "{bull}:jobs:wait"
+          listLength: "10"
+        authenticationRef:
+          name: redis-cluster-auth
