@@ -1,0 +1,14 @@
+---
+apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: redis-cluster-auth
+  namespace: redis-ha
+spec:
+  encryptedData:
+    redis-password: AgAtzm9ZxfYgH3jz+092eKkwnJ3TIrV1cwS4zmYEoiKDQQCBk4BCMoDl3YuYXRkqbgYeVFYs9YAipJ07HFpu5dnQ5dXxexl6jz5GZ5zp3RwJ3QoKVMQxgVXO9sMKTSDU+aDshedEAU8BZALVOS9bJXNs7HwGmkgSHhoe8TqR6o+jlIXQWfBrPn5MbB0tr6vcYhCyPV4uQJ5Ay8Od3KIzr8j4XVZgplQUrLVaOyKMPq+aGmBWan6fQu5ZrSQkVkKkAgZb7XKWzEsfY/jtG3HIxHLZKa3/POOqvtsRr8gppdFuKtEmOscOiOyZFtMVn5L8wb6THpAnE4h15qoNYqTg1F1KEmZnQBfChI6xrkUPBhTlFLQjdGGrV8kCb50785AIjmQqGx/e+fRzeg8488Kq7eqGqMTRv316FPwuzHxf+3rIZcuxRiLWgMquUv1yrxT4vMfljUYfaUH78EaYgZE/AqMeMQt9dP6Uy9tLvgmNNDE5jp/HRyX8DDE0ZjMuGxP97F3fn2udbj8XyE1eLNClx3sgtJoSIYzk5MzGnWPiHOtV+9qjOfOodURjWLwVjIoSgCTsS/+XhVLRMKRuCC7uNQ2bELvUx5lsmy4piTaNwqJrW+itfNT6EhLtuyO2WgcDVTPAKBdDTfkDGEvq8arplOLM2zR3uQcKu/zZPj2SnyAmq2eALCq/iXmJbDU53sUzE6fEUfedLEJp8Rx2bd4hNWqDztyvY7k7KTxAgUge9BM24i7SIdcjlDONAwXzIj+8T+ijCLxgxwWc6qvzIrHkHxsR
+  template:
+    metadata:
+      name: redis-cluster-auth
+      namespace: redis-ha
+    type: Opaque
