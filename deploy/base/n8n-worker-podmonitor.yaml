@@ -11,10 +11,18 @@ spec:
       - n8n
   selector:
     matchLabels:
+      app.kubernetes.io/component: worker
       app.kubernetes.io/instance: n8n
       app.kubernetes.io/name: n8n
-      app.kubernetes.io/component: worker
   podMetricsEndpoints:
-    - targetPort: 5678
-      path: /metrics
+    - path: /metrics
       interval: 30s
+      relabelings:
+        - sourceLabels:
+            - __meta_kubernetes_pod_container_name
+          action: keep
+          regex: n8n-worker
+        - sourceLabels:
+            - __meta_kubernetes_pod_ip
+          targetLabel: __address__
+          replacement: "${1}:5678"
