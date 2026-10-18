@@ -5,34 +5,163 @@ metadata:
   namespace: monitoring
   labels:
     release: prometheus
+    app.kubernetes.io/part-of: n8n
 spec:
   groups:
-    - name: n8n-runtime
+    # ---------------------------------------------------------------- availability
+    - name: n8n-availability
       rules:
-        - alert: N8nPodCrashLooping
-          expr: 'kube_pod_container_status_waiting_reason{namespace="n8n",reason="CrashLoopBackOff"} == 1'
-          for: 5m
-          labels:
-            severity: warning
+        - alert: N8nComponentDown
+          expr: kube_deployment_status_replicas_available{namespace="n8n",deployment=~"n8n-main|n8n-worker|n8n-webhook-processor"} == 0
+          for: 2m
+          labels: {severity: critical, service: n8n}
           annotations:
-            summary: "An n8n pod is crash-looping"
-            description: "Pod {{ $labels.pod }} is crash-looping."
+            summary: "n8n component {{ $labels.deployment }} has no available replicas"
+            description: "Check: kubectl get pods -n n8n; kubectl describe deploy {{ $labels.deployment }} -n n8n"
 
-        - alert: N8nDeploymentUnavailable
-          expr: 'kube_deployment_status_replicas_unavailable{namespace="n8n",deployment=~"n8n-main|n8n-worker|n8n-webhook-processor"} > 0'
+        - alert: N8nDeploymentMissing
+          expr: absent(kube_deployment_status_replicas_available{namespace="n8n",deployment="n8n-main"})
           for: 5m
-          labels:
-            severity: critical
+          labels: {severity: critical, service: n8n}
           annotations:
-            summary: "An n8n deployment has unavailable replicas"
-            description: "Deployment {{ $labels.deployment }} has unavailable replicas."
+            summary: "n8n-main Deployment is missing from the cluster"
+            description: "Check ArgoCD app n8n and: kubectl get deploy -n n8n"
 
+        - alert: N8nDeploymentDegraded
+          expr: kube_deployment_status_replicas_unavailable{namespace="n8n",deployment=~"n8n-main|n8n-worker|n8n-webhook-processor"} > 0
+          for: 10m
+          labels: {severity: warning, service: n8n}
+          annotations:
+            summary: "{{ $labels.deployment }} has unavailable replicas for 10m"
+            description: "Partial outage or a stuck rollout. Check pod events in namespace n8n."
+
+        - alert: PodCrashLooping
+          expr: kube_pod_container_status_waiting_reason{namespace=~"n8n|redis-ha",reason="CrashLoopBackOff"} == 1
+          for: 5m
+          labels: {severity: warning, service: n8n}
+          annotations:
+            summary: "{{ $labels.namespace }}/{{ $labels.pod }} ({{ $labels.container }}) is crash-looping"
+            description: "Check: kubectl logs -n {{ $labels.namespace }} {{ $labels.pod }} -c {{ $labels.container }} --previous"
+
+        - alert: ContainerOOMKilled
+          expr: |
+            increase(kube_pod_container_status_restarts_total{namespace=~"n8n|redis-ha"}[15m]) > 0
+            and on(namespace,pod,container)
+            kube_pod_container_status_last_terminated_reason{reason="OOMKilled"} == 1
+          labels: {severity: warning, service: n8n}
+          annotations:
+            summary: "{{ $labels.namespace }}/{{ $labels.pod }} ({{ $labels.container }}) was OOM-killed"
+            description: "Memory limit too low or a leak. Compare with the VPA recommendation."
+
+        - alert: PodNotReady
+          expr: |
+            kube_pod_status_ready{namespace=~"n8n|redis-ha",condition="false"} == 1
+            and on(namespace,pod) kube_pod_status_phase{phase="Running"} == 1
+          for: 10m
+          labels: {severity: warning, service: n8n}
+          annotations:
+            summary: "{{ $labels.namespace }}/{{ $labels.pod }} is running but not ready"
+            description: "Readiness probe failing for 10m."
+
+        - alert: N8nTargetDown
+          expr: up{namespace="n8n"} == 0
+          for: 3m
+          labels: {severity: critical, service: n8n}
+          annotations:
+            summary: "Prometheus cannot scrape {{ $labels.pod }}"
+            description: "Metrics endpoint is down or blocked (check the NetworkPolicy)."
+
+    # ---------------------------------------------------------------- scaling & resources
+    - name: n8n-scaling
+      rules:
+        - alert: AutoscalerAtMaxReplicas
+          expr: |
+            kube_horizontalpodautoscaler_status_current_replicas{namespace="n8n"}
+            >= on(namespace,horizontalpodautoscaler)
+            kube_horizontalpodautoscaler_spec_max_replicas{namespace="n8n"}
+          for: 15m
+          labels: {severity: warning, service: n8n}
+          annotations:
+            summary: "{{ $labels.horizontalpodautoscaler }} has been at max replicas for 15m"
+            description: "Capacity ceiling reached. Raise the max or investigate the load."
+
+        - alert: AutoscalerNotActive
+          expr: kube_horizontalpodautoscaler_status_condition{namespace="n8n",condition="ScalingActive",status="false"} == 1
+          for: 10m
+          labels: {severity: warning, service: n8n}
+          annotations:
+            summary: "{{ $labels.horizontalpodautoscaler }} cannot scale"
+            description: "Check metrics-server (HPA) or KEDA and its Redis connection."
+
+        - alert: ContainerMemoryNearLimit
+          expr: |
+            max by (namespace,pod,container) (container_memory_working_set_bytes{namespace=~"n8n|redis-ha",container!="",container!="POD"})
+            / on(namespace,pod,container)
+            max by (namespace,pod,container) (kube_pod_container_resource_limits{namespace=~"n8n|redis-ha",resource="memory"})
+            > 0.9
+          for: 10m
+          labels: {severity: warning, service: n8n}
+          annotations:
+            summary: "{{ $labels.pod }}/{{ $labels.container }} is above 90% of its memory limit"
+            description: "OOM kill likely. Raise the limit or investigate."
+
+    # ---------------------------------------------------------------- data stores
+    - name: n8n-data-stores
+      rules:
+        - alert: PostgresNotReady
+          expr: kube_pod_status_ready{namespace="n8n",pod=~"n8n-db-[0-9]+",condition="true"} == 0
+          for: 2m
+          labels: {severity: critical, service: postgres}
+          annotations:
+            summary: "Postgres pod {{ $labels.pod }} is not ready"
+            description: "n8n cannot run without its database. Check: kubectl get cluster -n n8n"
+
+        - alert: PostgresPodMissing
+          expr: absent(kube_pod_status_ready{namespace="n8n",pod=~"n8n-db-[0-9]+",condition="true"})
+          for: 5m
+          labels: {severity: critical, service: postgres}
+          annotations:
+            summary: "No Postgres (CNPG) pod found in namespace n8n"
+            description: "Check the CNPG operator and the Cluster resource."
+
+        - alert: RedisClusterDegraded
+          expr: |
+            kube_statefulset_status_replicas_ready{namespace="redis-ha"}
+            < on(namespace,statefulset)
+            kube_statefulset_replicas{namespace="redis-ha"}
+          for: 5m
+          labels: {severity: critical, service: redis}
+          annotations:
+            summary: "Redis StatefulSet {{ $labels.statefulset }} has missing nodes"
+            description: "Queue backend degraded. Check: kubectl get pods -n redis-ha"
+
+    # ---------------------------------------------------------------- backups
+    - name: n8n-backups
+      rules:
         - alert: PostgreSQLBackupJobFailed
-          expr: 'kube_job_status_failed{namespace="n8n",job_name=~"pg-backup(-to-s3)?-.*"} > 0'
+          expr: kube_job_status_failed{namespace="n8n",job_name=~"pg-backup(-to-s3)?-.*"} > 0
           for: 1m
-          labels:
-            severity: critical
+          labels: {severity: critical, service: backup}
           annotations:
-            summary: "A PostgreSQL backup job failed"
-            description: "Backup job {{ $labels.job_name }} failed."
+            summary: "Backup job {{ $labels.job_name }} failed"
+            description: "Check: kubectl logs job/{{ $labels.job_name }} -n n8n"
 
+        - alert: PostgreSQLBackupStale
+          expr: |
+            (time() - kube_cronjob_status_last_successful_time{namespace="n8n",cronjob="pg-backup"} > 3600)
+            or absent(kube_cronjob_status_last_successful_time{namespace="n8n",cronjob="pg-backup"})
+          for: 10m
+          labels: {severity: critical, service: backup}
+          annotations:
+            summary: "No successful database dump in over 1 hour (schedule: every 30 min)"
+            description: "Check: kubectl get cronjob,job -n n8n"
+
+        - alert: S3UploadStale
+          expr: |
+            (time() - kube_cronjob_status_last_successful_time{namespace="n8n",cronjob="pg-backup-to-s3"} > 5400)
+            or absent(kube_cronjob_status_last_successful_time{namespace="n8n",cronjob="pg-backup-to-s3"})
+          for: 10m
+          labels: {severity: critical, service: backup}
+          annotations:
+            summary: "No successful S3 upload in over 90 minutes"
+            description: "Offsite copy is falling behind. Check S3 credentials and connectivity."
