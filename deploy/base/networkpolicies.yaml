@@ -34,6 +34,9 @@ spec:
         - podSelector:
             matchLabels:
               app: pg-backup
+        - podSelector:
+            matchLabels:
+              app: pg-restore
       ports:
         - port: 5432
         - port: 8000
