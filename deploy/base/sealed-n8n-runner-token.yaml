@@ -1,0 +1,14 @@
+---
+apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: n8n-runner-token
+  namespace: n8n
+spec:
+  encryptedData:
+    auth-token: AgCNDMdMGOKzXo+yagN98Nfonsbd8xQmDH2IkNTgke5oKSEn9mYyY/mF8EOaoHzCa+puVwOES9m+uXEEbGqcIPVBpLXib3cqE3XwQVKAZda7mq6w708z8xEg41NF3fZt9A1MIh9M1qELy0iSgT/dd5Y65M3qmqU7Vj3tB1Ev51v+s0ETVg3dAMxs3hCj3ld+DDpyF5piqs8KXR77Eu7NjR68cPeals6/zDPzby4NGGb7KBHPwL0OxiDn8HGWPhSJKoRuaIcM6/DIQCxxSR25625UyRnqaWdKb0oOrp0Gy6SRNy+irSTHfJgn1Ta1zvjHSKGzz5kMyWRgF6b4Fz8x6cFi6ETjkYUmwsS6vu3azX1PQ8SJ/8sd34JSnPYiXAVBknxQ27SX9ZmurP5wJwVwe0e27pownfCi9pELOYna3cHx9FDEnzIk9duKfFwVI+PNd9sfqYrwIx9+HntXsVg2dtA9MYz5RXeJV+CVb7RLA8vz6xht41LLkylvqo4YhpxQgs4ZEyMzyLKFylNauKZtNAlrRev/0sDSW6BFCZ2FPyv8ngCjNZGpRjkc0o0og9pbfIO6QR7/ikGjRwgm9BeZ7wtGW/3bScN/jmMloCL/6lGoVAJqsaiR81YvJI+TRc+x9/zCszTyxqReKFzOmevsn+T2ko2dZpCnJhhEDvXn7a9v2jtuCJUfT9+Q366vde/NIeIp8qJQsjTSp2MhEQbjKbsFjqq9DGd+BWdEeWO5WJxcrHK3ZEL0XoEmSU/OuA==
+  template:
+    metadata:
+      name: n8n-runner-token
+      namespace: n8n
+    type: Opaque
