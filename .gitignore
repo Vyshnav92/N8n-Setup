@@ -1,1 +1,3 @@
 alertmanager-values.yaml
+*.tgz
+old-values.yaml

@@ -4,35 +4,70 @@ metadata:
   name: pg-backup-to-s3
   namespace: n8n
 spec:
-  schedule: "10,40 * * * *"
+  schedule: "15,45 * * * *"
   concurrencyPolicy: Forbid
-
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 900
+      ttlSecondsAfterFinished: 86400
       template:
+        metadata:
+          labels:
+            app: pg-backup-to-s3
         spec:
-          restartPolicy: OnFailure
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 26
+            runAsGroup: 26
+            fsGroup: 26
+            seccompProfile:
+              type: RuntimeDefault
           containers:
             - name: upload
-              image: rclone/rclone:latest
-              command: ["/bin/sh", "-c"]
+              image: rclone/rclone:1.68.2
+              command: ["rclone"]
               args:
-                - |
-                  set -eu
-                  rclone copy /backups s3:n8n-backup-v1/n8n-postgres \
-                    --min-age 10m \
-                    --include 'n8n-*.dump' \
-                    --exclude '*' \
-                    --log-level INFO
+                - copy
+                - /backups
+                - s3:n8n-backup-v1/n8n-postgres
+                - --min-age
+                - 10m
+                - --include
+                - n8n-*.dump
+                - --log-level
+                - INFO
               envFrom:
                 - secretRef:
                     name: s3-backup
+              env:
+                - name: HOME
+                  value: /tmp
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  memory: 256Mi
               volumeMounts:
                 - name: backups
                   mountPath: /backups
                   readOnly: true
-
+                - name: tmp
+                  mountPath: /tmp
           volumes:
             - name: backups
               persistentVolumeClaim:
                 claimName: pg-backup
+            - name: tmp
+              emptyDir:
+                sizeLimit: 256Mi
