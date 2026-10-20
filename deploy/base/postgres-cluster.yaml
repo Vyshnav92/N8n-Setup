@@ -5,6 +5,9 @@ metadata:
   namespace: n8n
 spec:
   instances: 1
+  postgresql:
+    parameters:
+      log_min_duration_statement: "1000"
   storage:
     size: 2Gi
   bootstrap:
