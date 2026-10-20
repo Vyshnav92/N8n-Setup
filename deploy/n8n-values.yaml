@@ -87,6 +87,8 @@ config:
       value: "true"
     - name: N8N_METRICS_INCLUDE_QUEUE_METRICS
       value: "true"
+    - name: N8N_METRICS_INCLUDE_MESSAGE_EVENT_BUS_METRICS
+      value: "true"
     - name: N8N_METRICS_INCLUDE_WORKFLOW_ID_LABEL
       value: "true"
     - name: N8N_METRICS_INCLUDE_NODE_TYPE_LABEL
