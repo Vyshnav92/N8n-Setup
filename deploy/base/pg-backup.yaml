@@ -28,11 +28,14 @@ spec:
             app: pg-backup
         spec:
           restartPolicy: Never
+          automountServiceAccountToken: false
           securityContext:
             runAsNonRoot: true
             runAsUser: 26
             runAsGroup: 26
             fsGroup: 26
+            seccompProfile:
+              type: RuntimeDefault
           containers:
             - name: dump
               image: ghcr.io/cloudnative-pg/postgresql:18.6-system-trixie
@@ -53,8 +56,10 @@ spec:
                   ls -lh /backup
               securityContext:
                 allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
                 capabilities:
-                  drop: ["ALL"]
+                  drop:
+                    - ALL
               resources:
                 requests:
                   cpu: 50m
@@ -64,7 +69,11 @@ spec:
               volumeMounts:
                 - name: backup
                   mountPath: /backup
+                - name: tmp
+                  mountPath: /tmp
           volumes:
             - name: backup
               persistentVolumeClaim:
                 claimName: pg-backup
+            - name: tmp
+              emptyDir: {}
