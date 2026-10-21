@@ -4,7 +4,7 @@ metadata:
   name: n8n-db
   namespace: n8n
 spec:
-  instances: 1
+  instances: 2
   postgresql:
     parameters:
       log_min_duration_statement: "1000"
