@@ -29,6 +29,11 @@ data:
       server_tokens off;
       client_max_body_size 16m;
 
+      # Keep Prometheus metrics available only through the direct scrape target.
+      location ~* ^/metrics/?$ {
+        return 404;
+      }
+
       # Production webhooks go to webhook processors
       location ~ ^/(webhook|webhook-waiting)/ {
         limit_req zone=webhooks burst=40 nodelay;
