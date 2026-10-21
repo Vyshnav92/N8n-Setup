@@ -28,6 +28,48 @@ spec:
         persistence:
           enabled: true
           size: 1Gi
+        networkPolicy:
+          enabled: false
+        extraDeploy:
+          - apiVersion: networking.k8s.io/v1
+            kind: NetworkPolicy
+            metadata:
+              name: redis-ha-redis-cluster
+              namespace: redis-ha
+            spec:
+              podSelector:
+                matchLabels:
+                  app.kubernetes.io/instance: redis-ha
+                  app.kubernetes.io/name: redis-cluster
+              policyTypes:
+                - Ingress
+              ingress:
+                - from:
+                    - namespaceSelector:
+                        matchLabels:
+                          kubernetes.io/metadata.name: n8n
+                      podSelector:
+                        matchLabels:
+                          app.kubernetes.io/name: n8n
+                    - namespaceSelector:
+                        matchLabels:
+                          kubernetes.io/metadata.name: keda
+                      podSelector:
+                        matchLabels:
+                          app.kubernetes.io/name: keda-operator
+                  ports:
+                    - port: 6379
+                      protocol: TCP
+                - from:
+                    - podSelector:
+                        matchLabels:
+                          app.kubernetes.io/instance: redis-ha
+                          app.kubernetes.io/name: redis-cluster
+                  ports:
+                    - port: 6379
+                      protocol: TCP
+                    - port: 16379
+                      protocol: TCP
         resourcesPreset: nano
   destination:
     server: https://kubernetes.default.svc

@@ -41,7 +41,7 @@ spec:
         - port: 5432
         - port: 8000
 ---
-# 3. n8n's own web port stays reachable (UI, webhooks)
+# 3. n8n accepts web traffic only from the in-namespace proxy and Prometheus.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -53,5 +53,31 @@ spec:
       app.kubernetes.io/name: n8n
   policyTypes: [Ingress]
   ingress:
-    - ports:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: nginx-proxy
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
         - port: 5678
+---
+# 4. The proxy is the client-facing entry point (HTTP and HTTPS).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nginx-proxy-allow-clients
+  namespace: n8n
+spec:
+  podSelector:
+    matchLabels:
+      app: nginx-proxy
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - port: 8080
+        - port: 8443
