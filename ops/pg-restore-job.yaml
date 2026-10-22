@@ -27,7 +27,7 @@ spec:
           type: RuntimeDefault
       initContainers:
         - name: fetch
-          image: rclone/rclone:${RCLONE_TAG}
+          image: rclone/rclone:1.68.2
           command: ["/bin/sh", "-ec"]
           args:
             - |
@@ -77,8 +77,8 @@ spec:
             - name: PGPASSWORD
               valueFrom:
                 secretKeyRef: { name: n8n-db-app, key: password }
-            - { name: TARGET_DB, value: "${TARGET_DB}" }
-            - { name: ALLOW_OVERWRITE, value: "${ALLOW_OVERWRITE}" }
+            - { name: TARGET_DB, value: "__TARGET_DB__" }
+            - { name: ALLOW_OVERWRITE, value: "__ALLOW_OVERWRITE__" }
           command: ["/bin/bash", "-c"]
           args:
             - |
