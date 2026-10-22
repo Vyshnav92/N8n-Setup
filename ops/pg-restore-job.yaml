@@ -28,8 +28,29 @@ spec:
       initContainers:
         - name: fetch
           image: rclone/rclone:${RCLONE_TAG}
-          command: ["rclone"]
-          args: ["copyto", "s3:n8n-backup-v1/n8n-postgres/${DUMP_KEY}", "/work/restore.dump", "--log-level", "INFO"]
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              set -eu
+
+              remote="s3:n8n-backup-v1/n8n-postgres"
+
+              listing="$(rclone lsf "$remote" --files-only)"
+
+              latest="$(printf '%s\n' "$listing" |
+                grep -E '^n8n-[0-9]{8}T[0-9]{6}Z\.dump$' |
+                sort | tail -n 1 || true)"
+
+              if [ -z "$latest" ]; then
+                echo "ERROR: No completed backup found in S3" >&2
+                exit 1
+              fi
+
+              echo "Latest S3 backup selected: $latest"
+
+              rclone copyto "$remote/$latest" \
+                /work/restore.dump --log-level INFO
+
           envFrom:
             - secretRef:
                 name: s3-backup
