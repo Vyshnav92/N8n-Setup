@@ -13,7 +13,7 @@ spec:
       rules:
         - alert: N8nComponentDown
           expr: kube_deployment_status_replicas_available{namespace="n8n",deployment=~"n8n-main|n8n-worker|n8n-webhook-processor"} == 0
-          for: 2m
+          for: 10s
           labels: {severity: critical, service: n8n}
           annotations:
             summary: "n8n component {{ $labels.deployment }} has no available replicas"
