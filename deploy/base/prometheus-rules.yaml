@@ -110,7 +110,7 @@ spec:
       rules:
         - alert: PostgresNotReady
           expr: kube_pod_status_ready{namespace="n8n",pod=~"n8n-db-[0-9]+",condition="true"} == 0
-          for: 2m
+          for: 10s
           labels: {severity: critical, service: postgres}
           annotations:
             summary: "Postgres pod {{ $labels.pod }} is not ready"
