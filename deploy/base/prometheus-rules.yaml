@@ -37,7 +37,7 @@ spec:
 
         - alert: PodCrashLooping
           expr: kube_pod_container_status_waiting_reason{namespace=~"n8n|redis-ha",reason="CrashLoopBackOff"} == 1
-          for: 5m
+          for: 10s
           labels: {severity: warning, service: n8n}
           annotations:
             summary: "{{ $labels.namespace }}/{{ $labels.pod }} ({{ $labels.container }}) is crash-looping"
@@ -129,7 +129,7 @@ spec:
             kube_statefulset_status_replicas_ready{namespace="redis-ha"}
             < on(namespace,statefulset)
             kube_statefulset_replicas{namespace="redis-ha"}
-          for: 5m
+          for: 10s
           labels: {severity: critical, service: redis}
           annotations:
             summary: "Redis StatefulSet {{ $labels.statefulset }} has missing nodes"
