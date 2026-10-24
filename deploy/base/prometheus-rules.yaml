@@ -165,3 +165,26 @@ spec:
           annotations:
             summary: "No successful S3 upload in over 90 minutes"
             description: "Offsite copy is falling behind. Check S3 credentials and connectivity."
+
+    - name: node-capacity
+      interval: 15s
+      rules:
+        - alert: NodeMemoryHigh
+          expr: |
+            (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 > 80
+          for: 30s
+          labels:
+            severity: warning
+            service: platform
+          annotations:
+            summary: 'Node memory usage is {{ printf "%.0f" $value }}%'
+            description: |
+              Node memory has stayed above 80% for 30 seconds.
+              Current usage: {{ printf "%.1f" $value }}%
+
+              Top 3 n8n pods by container memory:
+              {{- range query "topk(3, sum by (namespace, pod) (container_memory_working_set_bytes{namespace=\"n8n\",container!=\"\",container!=\"POD\"}))" }}
+              {{ .Labels.pod }}: {{ .Value | humanize1024 }}B
+              {{- else }}
+              No n8n container memory metrics are currently available.
+              {{- end }}
