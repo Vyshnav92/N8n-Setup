@@ -171,7 +171,7 @@ spec:
       rules:
         - alert: NodeMemoryHigh
           expr: |
-            (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 > 80
+            (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 > 30
           for: 30s
           labels:
             severity: warning
