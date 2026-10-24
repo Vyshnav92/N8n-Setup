@@ -1,7 +1,20 @@
+# Restores the NEWEST PostgreSQL dump from S3 into the n8n database.
+#
+#   Run        : kubectl apply -f ops/pg-restore-job.yaml
+#   Run again  : kubectl replace --force -f ops/pg-restore-job.yaml
+#   Follow     : kubectl logs -f job/pg-restore -n n8n -c fetch      (which dump was chosen)
+#                kubectl logs -f job/pg-restore -n n8n -c restore    (the restore itself)
+#
+# Rebuild order: Postgres healthy -> run this Job -> only then start n8n.
+# Safety       : the Job refuses to touch a database that already holds workflows,
+#                unless ALLOW_OVERWRITE is set to "true" below (stop n8n first).
+# Options      : DUMP_KEY   "latest" or an exact name, e.g. n8n-20261024T120000Z.dump
+#                TARGET_DB  database to restore into (default n8n)
+# This file lives in ops/ on purpose: ArgoCD does not sync it, so it only runs when you apply it.
 apiVersion: batch/v1
 kind: Job
 metadata:
-  generateName: pg-restore-
+  name: pg-restore
   namespace: n8n
   labels:
     app.kubernetes.io/name: pg-restore
@@ -12,7 +25,7 @@ spec:
   template:
     metadata:
       labels:
-        app: pg-restore
+        app: pg-restore # lets the pod through the Postgres NetworkPolicy
         app.kubernetes.io/name: pg-restore
     spec:
       restartPolicy: Never
@@ -31,32 +44,32 @@ spec:
           command: ["/bin/sh", "-ec"]
           args:
             - |
-              set -eu
-
               remote="s3:n8n-backup-v1/n8n-postgres"
+              pattern='^n8n-[0-9]{8}T[0-9]{6}Z\.dump$'
 
-              listing="$(rclone lsf "$remote" --files-only)"
-
-              latest="$(printf '%s\n' "$listing" |
-                grep -E '^n8n-[0-9]{8}T[0-9]{6}Z\.dump$' |
-                sort | tail -n 1 || true)"
-
-              if [ -z "$latest" ]; then
-                echo "ERROR: No completed backup found in S3" >&2
-                exit 1
+              if [ "$DUMP_KEY" = "latest" ]; then
+                listing="$(rclone lsf "$remote" --files-only)"
+                dump="$(printf '%s\n' "$listing" | grep -E "$pattern" | sort | tail -n 1 || true)"
+              else
+                dump="$DUMP_KEY"
+                printf '%s\n' "$dump" | grep -qE "$pattern" || {
+                  echo "ERROR: DUMP_KEY must look like n8n-YYYYMMDDTHHMMSSZ.dump" >&2
+                  exit 1
+                }
               fi
 
-              echo "Latest S3 backup selected: $latest"
+              [ -n "$dump" ] || { echo "ERROR: no completed dump found in S3" >&2; exit 1; }
+              echo "Selected dump: $dump"
 
-              rclone copyto "$remote/$latest" \
-                /work/restore.dump --log-level INFO
-
+              rclone copyto "$remote/$dump" /work/restore.dump --log-level INFO
+              printf '%s' "$dump" > /work/dump-name
+              ls -l /work
           envFrom:
             - secretRef:
                 name: s3-backup
           env:
-            - name: HOME
-              value: /tmp
+            - { name: HOME, value: /tmp }
+            - { name: DUMP_KEY, value: "latest" }
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -77,28 +90,57 @@ spec:
             - name: PGPASSWORD
               valueFrom:
                 secretKeyRef: { name: n8n-db-app, key: password }
-            - { name: TARGET_DB, value: "__TARGET_DB__" }
-            - { name: ALLOW_OVERWRITE, value: "__ALLOW_OVERWRITE__" }
+            - { name: PGCONNECT_TIMEOUT, value: "10" }
+            - { name: PGOPTIONS, value: "-c lock_timeout=60s" }
+            - { name: TARGET_DB, value: "n8n" }
+            - { name: ALLOW_OVERWRITE, value: "false" }
           command: ["/bin/bash", "-c"]
           args:
             - |
               set -euo pipefail
               f=/work/restore.dump
+              echo "Dump: $(cat /work/dump-name)"
+
+              echo "Waiting for PostgreSQL at $PGHOST ..."
+              ready=0
+              for i in $(seq 1 60); do
+                if pg_isready -q -t 5; then ready=1; break; fi
+                echo "  not ready yet (attempt $i/60)"; sleep 5
+              done
+              [ "$ready" = 1 ] || { echo "ERROR: PostgreSQL not ready after 5 minutes"; exit 1; }
+
               size=$(stat -c %s "$f"); echo "Dump size: $size bytes"
               [ "$size" -gt 10240 ] || { echo "ERROR: dump is suspiciously small"; exit 1; }
-              pg_restore --list "$f" > /tmp/toc.txt
-              grep -q 'TABLE DATA public workflow_entity' /tmp/toc.txt || { echo "ERROR: no workflow data in archive"; exit 1; }
-              echo "Archive OK: $(wc -l < /tmp/toc.txt) entries"
+
+              pg_restore --list "$f" > /tmp/toc.txt || { echo "ERROR: archive is unreadable"; exit 1; }
+              for t in workflow_entity credentials_entity migrations; do
+                grep -q "TABLE DATA public $t " /tmp/toc.txt || { echo "ERROR: no data for $t in archive"; exit 1; }
+              done
+              echo "Archive OK: $(grep -c . /tmp/toc.txt) entries; $(grep -m1 'Archive created at' /tmp/toc.txt | sed 's/^; *//')"
+
               existing=$(psql -d "$TARGET_DB" -Atc "select count(*) from public.workflow_entity" 2>/dev/null || echo 0)
               echo "Workflows already in $TARGET_DB: $existing"
               if [ "$existing" -gt 0 ] && [ "$ALLOW_OVERWRITE" != "true" ]; then
-                echo "REFUSING: target already has data. Re-run with ALLOW_OVERWRITE=true"; exit 1
+                echo "REFUSING: $TARGET_DB already contains workflows."
+                echo "To overwrite it on purpose: stop n8n, set ALLOW_OVERWRITE to \"true\" in this file, then run: kubectl replace --force -f ops/pg-restore-job.yaml"
+                exit 1
               fi
+
+              others=$(psql -d "$TARGET_DB" -Atc "select count(*) from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid()" 2>/dev/null || echo 0)
+              if [ "$others" -gt 0 ]; then
+                echo "WARNING: $others other session(s) connected to $TARGET_DB (is n8n still running?). The restore waits up to 60s for locks, then fails safely."
+              fi
+
               echo "Restoring into $TARGET_DB ..."
               pg_restore --clean --if-exists --no-owner --no-privileges --single-transaction --exit-on-error -d "$TARGET_DB" "$f"
-              psql -d "$TARGET_DB" -Atc "select 'workflows='||count(*) from public.workflow_entity" || true
-              psql -d "$TARGET_DB" -Atc "select 'credentials='||count(*) from public.credentials_entity" || true
-              echo "RESTORE COMPLETE"
+
+              w=$(psql -d "$TARGET_DB" -Atc "select count(*) from public.workflow_entity")
+              c=$(psql -d "$TARGET_DB" -Atc "select count(*) from public.credentials_entity")
+              m=$(psql -d "$TARGET_DB" -Atc "select count(*) from public.migrations")
+              echo "Restored: workflows=$w credentials=$c migrations=$m"
+              [ "$m" -gt 0 ] || { echo "ERROR: migrations table is empty after restore"; exit 1; }
+              [ "$w" -gt 0 ] || echo "WARNING: the restored database has no workflows"
+              echo "RESTORE COMPLETE. Next: start n8n with the SAME N8N_ENCRYPTION_KEY, then open a credential to confirm it decrypts."
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -111,7 +153,5 @@ spec:
             - { name: work, mountPath: /work, readOnly: true }
             - { name: tmp, mountPath: /tmp }
       volumes:
-        - name: work
-          emptyDir: { sizeLimit: 2Gi }
-        - name: tmp
-          emptyDir: { sizeLimit: 256Mi }
+        - { name: work, emptyDir: { sizeLimit: 2Gi } }
+        - { name: tmp, emptyDir: { sizeLimit: 256Mi } }
