@@ -93,6 +93,8 @@ config:
       value: "true"
     - name: N8N_METRICS_INCLUDE_NODE_TYPE_LABEL
       value: "true"
+    - name: N8N_CONCURRENCY_PRODUCTION_LIMIT
+      value: "20"
     - name: N8N_PROXY_HOPS
       value: "1"
     - name: QUEUE_HEALTH_CHECK_ACTIVE

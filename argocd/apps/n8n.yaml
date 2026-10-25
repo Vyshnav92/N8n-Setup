@@ -13,7 +13,7 @@ spec:
         releaseName: n8n
         valueFiles:
           - $values/deploy/n8n-values.yaml
-    - repoURL: git@github.com:Vyshnav92/N8n-Setup.git
+    - repoURL: https://github.com/Vyshnav92/N8n-Setup.git
       targetRevision: main
       ref: values
   destination:
