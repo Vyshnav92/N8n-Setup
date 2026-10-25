@@ -6,7 +6,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: git@github.com:Vyshnav92/N8n-Setup.git
+    repoURL: https://github.com/Vyshnav92/N8n-Setup.git
     targetRevision: main
     path: argocd/apps
   destination:
