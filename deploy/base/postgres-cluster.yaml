@@ -5,8 +5,19 @@ metadata:
   namespace: n8n
 spec:
   instances: 2
+  resources:
+    requests:
+      cpu: "500m"
+      memory: 1Gi
+    limits:
+      cpu: "1"
+      memory: 1Gi
   postgresql:
     parameters:
+      shared_buffers: "256MB"
+      effective_cache_size: "768MB"
+      work_mem: "8MB"
+      maintenance_work_mem: "64MB"
       log_min_duration_statement: "1000"
   storage:
     size: 2Gi
