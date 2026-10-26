@@ -131,6 +131,8 @@ config:
       value: "vaishnavsnair39@gmail.com"
     - name: N8N_INVITE_LINKS_EMAIL_ONLY
       value: "true"
+    - name: N8N_BLOCK_ENV_ACCESS_IN_NODE
+      value: "true"
 
 # Isolate Code node execution in external runner sidecars
 taskRunners:
