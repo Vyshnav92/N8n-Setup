@@ -4,6 +4,7 @@ metadata:
   name: pg-backup-to-s3
   namespace: n8n
 spec:
+  suspend: true
   schedule: "15,45 * * * *"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
