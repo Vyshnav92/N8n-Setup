@@ -15,6 +15,7 @@ metadata:
   name: pg-backup
   namespace: n8n
 spec:
+  suspend: true
   schedule: "*/30 * * * *"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
