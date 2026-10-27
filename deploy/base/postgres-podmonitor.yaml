@@ -1,0 +1,16 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: n8n-db
+  namespace: monitoring
+  labels:
+    release: prometheus
+spec:
+  namespaceSelector:
+    matchNames:
+      - n8n
+  selector:
+    matchLabels:
+      cnpg.io/cluster: n8n-db
+  podMetricsEndpoints:
+    - port: metrics
