@@ -138,33 +138,33 @@ spec:
     # ---------------------------------------------------------------- backups
     - name: n8n-backups
       rules:
-        - alert: PostgreSQLBackupJobFailed
-          expr: kube_job_status_failed{namespace="n8n",job_name=~"pg-backup(-to-s3)?-.*"} > 0
-          for: 1m
-          labels: {severity: critical, service: backup}
+        - alert: PostgresWalArchiveBacklog
+          expr: max(cnpg_collector_pg_wal_archive_status{namespace="n8n",value="ready"}) > 0
+          for: 15m
+          labels: {severity: critical, service: postgres}
           annotations:
-            summary: "Backup job {{ $labels.job_name }} failed"
-            description: "Check: kubectl logs job/{{ $labels.job_name }} -n n8n"
+            summary: "PostgreSQL WAL segments have remained unarchived for 15 minutes"
+            description: "Check Barman Cloud plugin health, ObjectStore credentials, and S3 connectivity."
 
-        - alert: PostgreSQLBackupStale
+        - alert: PostgresBackupFailed
           expr: |
-            (time() - kube_cronjob_status_last_successful_time{namespace="n8n",cronjob="pg-backup"} > 3600)
-            or absent(kube_cronjob_status_last_successful_time{namespace="n8n",cronjob="pg-backup"})
-          for: 10m
+            max(barman_cloud_cloudnative_pg_io_last_failed_backup_timestamp{namespace="n8n"})
+            > max(barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{namespace="n8n"})
+          for: 3m
           labels: {severity: critical, service: backup}
           annotations:
-            summary: "No successful database dump in over 1 hour (schedule: every 30 min)"
-            description: "Check: kubectl get cronjob,job -n n8n"
+            summary: "The most recent PostgreSQL base backup failed"
+            description: "Check CNPG plugin and Barman Cloud logs, S3 credentials, and bucket access."
 
-        - alert: S3UploadStale
+        - alert: PostgresNoRecentBaseBackup
           expr: |
-            (time() - kube_cronjob_status_last_successful_time{namespace="n8n",cronjob="pg-backup-to-s3"} > 5400)
-            or absent(kube_cronjob_status_last_successful_time{namespace="n8n",cronjob="pg-backup-to-s3"})
-          for: 10m
+            (time() - max(barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{namespace="n8n"}) > 129600)
+            or absent(barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{namespace="n8n"})
+          for: 5m
           labels: {severity: critical, service: backup}
           annotations:
-            summary: "No successful S3 upload in over 90 minutes"
-            description: "Offsite copy is falling behind. Check S3 credentials and connectivity."
+            summary: "No successful PostgreSQL base backup in the last 36 hours"
+            description: "Check the ScheduledBackup, Barman Cloud plugin, ObjectStore credentials, and S3 connectivity."
 
     - name: node-capacity
       interval: 15s
