@@ -5,6 +5,11 @@ metadata:
   namespace: n8n
 spec:
   instances: 2
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      isWALArchiver: true
+      parameters:
+        barmanObjectName: n8n-wal-store
   resources:
     requests:
       cpu: "500m"
