@@ -32,7 +32,7 @@ hpa:
 
 database:
   useExternal: true
-  host: n8n-db-rw
+  host: n8n-db-pooler-rw
   port: 5432
   database: n8n
   user: n8n
