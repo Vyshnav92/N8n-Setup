@@ -37,11 +37,33 @@ spec:
         - podSelector:
             matchLabels:
               app: pg-restore
+        - podSelector:
+            matchLabels:
+              cnpg.io/poolerName: n8n-db-pooler-rw
       ports:
         - port: 5432
         - port: 8000
 ---
-# 3. n8n accepts web traffic only from the in-namespace proxy and Prometheus.
+# 3. The PostgreSQL pooler accepts client connections from n8n.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pooler-allow-n8n
+  namespace: n8n
+spec:
+  podSelector:
+    matchLabels:
+      cnpg.io/poolerName: n8n-db-pooler-rw
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: n8n
+      ports:
+        - { protocol: TCP, port: 5432 }
+---
+# 4. n8n accepts web traffic only from the in-namespace proxy and Prometheus.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -66,7 +88,7 @@ spec:
       ports:
         - port: 5678
 ---
-# 4. The proxy is the client-facing entry point (HTTP and HTTPS).
+# 5. The proxy is the client-facing entry point (HTTP and HTTPS).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
