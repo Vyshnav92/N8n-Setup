@@ -313,11 +313,11 @@ dnsConfig: {}
 resources:
   main:
     requests:
-      cpu: 200m
-      memory: 512Mi
+      memory: "1Gi"    # Base memory for UI and coordination
+      cpu: "500m"      # Sufficient for API handling
     limits:
-      cpu: "1"
-      memory: 1Gi
+      memory: "4Gi"    # Allow burst for workflow loading
+      cpu: "2000m"     # Maximum for peak UI traffic
   worker:
     requests:
       cpu: 200m
@@ -587,7 +587,7 @@ executions:
   # Data pruning settings
   pruning:
     enabled: true                               # <-- Enable execution data pruning
-    maxAge: 336                                 # <-- Max execution age in hours (14 days)
+    maxAge: 168                                 # <-- Max execution age in hours (7 days)
     maxCount: 10000                            # <-- Max executions to keep (0 = no limit)
     hardDeleteBuffer: 1                         # <-- Buffer hours before hard delete
     hardDeleteInterval: 15                      # <-- Hard delete interval in minutes
