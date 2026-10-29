@@ -114,13 +114,27 @@ jobs:
           shellcheck -S warning ops/*.sh
           for f in ops/*.sh; do bash -n "$f"; done
 
-      # 9. Scan configuration for security misconfigurations.
-      #    Blocking: any HIGH or CRITICAL finding fails the build.
-      - name: Scan configuration with Trivy
+      # 9. Scan our own files. Blocking.
+      - name: Scan repository configuration with Trivy
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: config
           scan-ref: .
+          skip-files: rendered.yaml
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
+      # 10. Scan the rendered n8n chart, with two accepted exceptions.
+      - name: Write accepted Trivy exceptions
+        run: |
+          printf '%s\n' '# accepted risks for the rendered n8n chart' KSV-0014 KSV-0118 > rendered.trivyignore
+
+      - name: Scan rendered n8n chart with Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: config
+          scan-ref: rendered.yaml
+          trivyignores: rendered.trivyignore
           severity: HIGH,CRITICAL
           exit-code: "1"
 
