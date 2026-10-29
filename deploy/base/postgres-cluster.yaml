@@ -5,6 +5,12 @@ metadata:
   namespace: n8n
 spec:
   instances: 2
+  certificates:
+    serverAltDNSNames:
+      - n8n-db-pooler-rw
+      - n8n-db-pooler-rw.n8n
+      - n8n-db-pooler-rw.n8n.svc
+      - n8n-db-pooler-rw.n8n.svc.cluster.local
   plugins:
     - name: barman-cloud.cloudnative-pg.io
       isWALArchiver: true

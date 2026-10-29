@@ -32,6 +32,11 @@ hpa:
 
 database:
   useExternal: true
+  ssl:
+    enabled: true
+    existingSecret:
+      name: n8n-db-ca
+      caKey: ca.crt
   host: n8n-db-pooler-rw
   port: 5432
   database: n8n
