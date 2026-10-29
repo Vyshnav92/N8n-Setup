@@ -9,9 +9,15 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same branch makes the older run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
@@ -47,7 +53,7 @@ jobs:
       - name: Validate plain manifests
         run: |
           kubeconform -strict -ignore-missing-schemas -summary \
-            deploy/base argocd bootstrap
+            deploy/base argocd bootstrap ops
 
       # 5. Lint the n8n Helm chart and its values
       - name: Lint Helm chart
@@ -59,6 +65,7 @@ jobs:
 
           helm lint /tmp/n8n-chart/n8n \
             -f deploy/n8n-values.yaml
+
       # 6. Render the chart
       - name: Render n8n chart
         run: |
@@ -75,11 +82,139 @@ jobs:
           kubeconform -strict -ignore-missing-schemas -summary \
             rendered.yaml
 
-      # 8. Scan configuration for security misconfigurations
+      # 8. Repository rules (fast, no network)
+      - name: No plaintext Secret manifests
+        run: |
+          # Only SealedSecrets may be committed. A plain "kind: Secret" is a leak.
+          if grep -rnE '^kind: Secret[[:space:]]*$' deploy argocd bootstrap ops --include='*.yaml'; then
+            echo "::error::plaintext Secret found above - seal it with kubeseal or remove it"
+            exit 1
+          fi
+
+      - name: No floating image tags
+        run: |
+          # Rebuilds must install what was tested, so :latest is not allowed.
+          if grep -rnE 'image:[[:space:]]*[^[:space:]]+:latest|tag:[[:space:]]*"?latest' \
+               deploy argocd bootstrap ops --include='*.yaml'; then
+            echo "::error::':latest' image tag found above - pin a version"
+            exit 1
+          fi
+
+      - name: Argo CD apps never prune
+        run: |
+          # prune: false is a deliberate safety rule: deleting a file from Git
+          # must not delete a database. Turn it on per app only on purpose.
+          if grep -rnE 'prune:[[:space:]]*true' argocd bootstrap; then
+            echo "::error::prune: true found above - see the safety rule in this step"
+            exit 1
+          fi
+
+      - name: Shell scripts (shellcheck + syntax)
+        run: |
+          shellcheck -S warning ops/*.sh
+          for f in ops/*.sh; do bash -n "$f"; done
+
+      # 9. Scan configuration for security misconfigurations.
+      #    Blocking: any HIGH or CRITICAL finding fails the build.
       - name: Scan configuration with Trivy
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: config
           scan-ref: .
           severity: HIGH,CRITICAL
-          exit-code: "0"
+          exit-code: "1"
+
+  # Every chart Argo CD installs, rendered with the values Argo uses.
+  render-charts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tools
+        run: |
+          python -m pip install pyyaml
+          curl -fsSL \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | tar xz
+          sudo mv kubeconform /usr/local/bin/
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.18.6
+
+      # Reads each Helm app in argocd/apps, renders its pinned chart with the
+      # inline values Argo uses, and schema-checks the result. Catches a chart
+      # version removed from its registry, values a chart no longer accepts,
+      # and manifests that stop validating. The n8n app (values from a file)
+      # is rendered by the validate job.
+      - name: Render all pinned charts
+        run: |
+          python3 - <<'PY'
+          import glob, subprocess, sys, tempfile, yaml
+          failed = False
+          for f in sorted(glob.glob("argocd/apps/*.yaml")):
+              for d in yaml.safe_load_all(open(f)):
+                  spec = (d or {}).get("spec", {})
+                  src = spec.get("source")
+                  if not src or "chart" not in src:
+                      continue  # plain-git apps and multi-source apps (n8n)
+                  helm = src.get("helm") or {}
+                  chart, repo, ver = src["chart"], src["repoURL"], str(src["targetRevision"])
+                  rel = helm.get("releaseName", chart)
+                  ns = spec["destination"]["namespace"]
+                  print(f"== {chart} {ver} (release {rel}, namespace {ns})", flush=True)
+                  with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as vf:
+                      yaml.safe_dump(helm.get("valuesObject") or {}, vf)
+                  ref = ["--repo", repo, chart] if repo.startswith("http") else [f"oci://{repo}/{chart}"]
+                  cmd = ["helm", "template", rel, *ref, "--version", ver, "-n", ns, "-f", vf.name, "--include-crds"]
+                  out = subprocess.run(cmd, capture_output=True, text=True)
+                  if out.returncode:
+                      print("   FAIL: helm template:", out.stderr.strip()[-500:])
+                      failed = True
+                      continue
+                  chk = subprocess.run(["kubeconform", "-strict", "-ignore-missing-schemas", "-summary"],
+                                       input=out.stdout, capture_output=True, text=True)
+                  print("  ", chk.stdout.strip().splitlines()[-1] if chk.stdout.strip() else chk.stderr.strip())
+                  if chk.returncode:
+                      print("   FAIL: rendered manifests do not validate")
+                      failed = True
+          sys.exit(1 if failed else 0)
+          PY
+
+  # Looks for committed credentials in the whole Git history.
+  # Sealed Secrets ciphertext looks like a token to a scanner but is safe to
+  # commit, so those files are allow-listed in the config passed below.
+  secrets-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan history with gitleaks
+        env:
+          GITLEAKS_CONFIG_TOML: |
+            [extend]
+            useDefault = true
+
+            [allowlist]
+            description = "Sealed Secrets ciphertext and old vendored files"
+            paths = [
+              '''deploy/base/sealed-.*\.yaml''',
+              '''deploy/base/n8n-sealed-secret\.yaml''',
+              '''apps/n8n/sealed-secret\.yaml''',
+              '''deploy/barman-plugin/manifest\.yaml''',
+            ]
+        run: |
+          curl -fsSL \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.28.0/gitleaks_8.28.0_linux_x64.tar.gz \
+            | tar xz gitleaks
+          ./gitleaks detect --no-banner --redact
