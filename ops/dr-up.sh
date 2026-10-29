@@ -1,65 +1,80 @@
 #!/usr/bin/env bash
 # =============================================================================
-# dr-up.sh - rebuild the n8n platform on an EMPTY Kubernetes cluster from
-#            the git repo + your backups (Google Drive keys + S3 PITR archive).
+# dr-up.sh - rebuild the whole n8n platform on a NEW, EMPTY Kubernetes cluster
+#            from this git repo + your backups (age-encrypted keys on Google
+#            Drive, Postgres PITR archive in S3).
 #
-#   ./dr-up.sh                run everything: pre-DR checks -> build -> post-DR checks
-#                             (DRILL mode: safe, never writes to your production S3 archive)
-#   ./dr-up.sh --real         same, but the new cluster keeps archiving WAL to S3
-#                             (use this in a REAL disaster, when the old cluster is gone)
-#   ./dr-up.sh preflight      pre-DR checks only (changes nothing)
-#   ./dr-up.sh verify         post-DR checks only
-#   ./dr-up.sh readiness      run against your CURRENT/production cluster: "are we DR-ready?"
-#                             (also writes ops/dr-versions.env so a rebuild uses the same versions)
+#   ./ops/dr-up.sh preflight   checks only, changes nothing
+#   ./ops/dr-up.sh clean       remove leftovers of an earlier (failed) run
+#   ./ops/dr-up.sh             preflight -> build -> post-DR checks   (DRILL)
+#   ./ops/dr-up.sh --real      same, but the new cluster keeps archiving to S3
+#                              (use only when the old cluster is really gone)
+#   ./ops/dr-up.sh verify      post-DR checks only
 #
-# Required:  AGE_IDENTITY=/path/to/age-identity.txt   (private key for your encrypted key backups)
-# Optional:  see the "settings" block below (all can be passed as environment variables)
+# Needs two files; by default they are looked up next to the repo folder
+# (e.g. ~/n8n/age-key.txt and ~/n8n/rclone.conf):
+#   AGE_IDENTITY=/path/age-key.txt   RCLONE_CONFIG=/path/rclone.conf
+#
+# Options : --yes (no prompt)   --fresh-db (delete the restored DB and redo it)
+# Env     : TARGET_TIME=2026-10-29T08:00:00Z   restore to this moment (PITR)
+#           SOURCE_SERVER=n8n-db               S3 folder to restore from
+#           BACKUP_DATE=YYYYMMDD               key backup to use (default newest)
+#           START_N8N=0                        stop after DB + Redis (n8n off)
+#           MONITORING_VALUES / ALERTMANAGER_VALUES   extra helm values files
+# Tip     : ./ops/dr-up.sh 2>&1 | tee ~/n8n/dr.log     keeps a log to share
+# Safe to re-run: every step checks what already exists.
 # =============================================================================
 set -Eeuo pipefail
 
 # ------------------------------- settings ------------------------------------
-MODE="${DR_MODE:-drill}"                       # drill | real
-GDRIVE_PATH="${GDRIVE_PATH:-gdrive:n8n-dr}"    # where keys-backup.sh uploads
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
+PARENT="$(cd "$REPO/.." && pwd)"
+MODE="${DR_MODE:-drill}"
 AGE_IDENTITY="${AGE_IDENTITY:-}"
-REPO_URL="${REPO_URL:-https://github.com/Vyshnav92/N8n-Setup.git}"
-REPO_DIR="${REPO_DIR:-}"                       # default: the repo this script lives in, else ~/N8n-Setup-dr
-ALERTMANAGER_VALUES="${ALERTMANAGER_VALUES:-}" # your gitignored alertmanager-values.yaml (optional)
-ARGOCD_SSH_KEY="${ARGOCD_SSH_KEY:-}"           # only if your repo is private / apps use git@ URLs and you want SSH
-TARGET_TIME="${TARGET_TIME:-}"                 # PITR target e.g. 2026-10-26T12:00:00Z (empty = latest possible)
-SEALING_KEYS_FILE="${SEALING_KEYS_FILE:-}"     # default: newest sealing-keys-*.json.age on Drive
-N8N_SECRETS_FILE="${N8N_SECRETS_FILE:-}"       # default: newest n8n-secrets-*.json.age on Drive
-N8N_NS="${N8N_NS:-n8n}"
-N8N_SECRET_NAME="${N8N_SECRET_NAME:-n8n-secrets}"
-SOURCE_SERVER_NAME="${SOURCE_SERVER_NAME:-}"   # folder name of the old cluster inside the S3 archive (default: cluster name)
-RECOVERY_TIMEOUT="${RECOVERY_TIMEOUT:-2400}"   # seconds to wait for the database restore
-ALLOW_NONEMPTY="${ALLOW_NONEMPTY:-0}"          # 1 = allow running on a cluster that already has platform namespaces
-CONFIRM_CONTEXT="${CONFIRM_CONTEXT:-}"         # non-interactive: set to the kubectl context name you intend to modify
-# Version pins for things that are NOT in git (filled in by `readiness`, or set by hand; empty = latest)
-ARGOCD_VERSION="${ARGOCD_VERSION:-}"
-SEALED_SECRETS_CHART_VERSION="${SEALED_SECRETS_CHART_VERSION:-}"
-PROM_STACK_CHART_VERSION="${PROM_STACK_CHART_VERSION:-}"
-# -----------------------------------------------------------------------------
+RCLONE_CONFIG="${RCLONE_CONFIG:-}"
+if [[ -z "$AGE_IDENTITY" && -r "$PARENT/age-key.txt" ]]; then AGE_IDENTITY="$PARENT/age-key.txt"; fi
+if [[ -z "$RCLONE_CONFIG" && -r "$PARENT/rclone.conf" ]]; then RCLONE_CONFIG="$PARENT/rclone.conf"; fi
+if [[ -n "$RCLONE_CONFIG" ]]; then export RCLONE_CONFIG; fi
+GDRIVE="${GDRIVE_PATH:-gdrive:n8n-dr}"
+BACKUP_DATE="${BACKUP_DATE:-latest}"
+SOURCE_SERVER="${SOURCE_SERVER:-}"
+TARGET_TIME="${TARGET_TIME:-}"
+START_N8N="${START_N8N:-1}"
+RECOVERY_TIMEOUT="${RECOVERY_TIMEOUT:-2400}"
+MONITORING_VALUES="${MONITORING_VALUES:-}"
+ALERTMANAGER_VALUES="${ALERTMANAGER_VALUES:-}"
+FORCE_CLEAN="${FORCE_CLEAN:-0}"
+ASSUME_YES=0
+FRESH_DB=0
+NEW_SERVER=""
+LEFT=0
+
+N8N_NS=n8n
+REDIS_NS=redis-ha
+SECRET_NAME=n8n-secrets
+PLUGIN=barman-cloud.cloudnative-pg.io
+NS_LIST=(argocd n8n redis-ha cnpg-system cert-manager keda vpa monitoring)
+CRD_RE='\.(argoproj\.io|cnpg\.io|cert-manager\.io|keda\.sh|autoscaling\.k8s\.io|monitoring\.coreos\.com)$|^sealedsecrets\.bitnami\.com$'
+CLUSTER_RE='argocd|cnpg|cloudnative-pg|cert-manager|keda|vpa|prometheus|sealed-secrets|secrets-unsealer|barman|external\.metrics\.k8s\.io'
 
 CMD=up
 for a in "$@"; do
   case "$a" in
-    up|preflight|verify|readiness) CMD=$a ;;
-    --real)  MODE=real ;;
+    up|preflight|clean|verify) CMD=$a ;;
+    --real) MODE=real ;;
     --drill) MODE=drill ;;
-    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
+    --yes|-y) ASSUME_YES=1 ;;
+    --fresh-db) FRESH_DB=1 ;;
+    -h|--help) sed -n '2,25p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $a (try --help)"; exit 2 ;;
   esac
 done
 [[ "$MODE" == drill || "$MODE" == real ]] || { echo "DR_MODE must be drill or real"; exit 2; }
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -z "$REPO_DIR" ]]; then
-  if [[ -d "$SCRIPT_DIR/../deploy/base" ]]; then REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"; else REPO_DIR="$HOME/N8n-Setup-dr"; fi
-fi
-
-# ------------------------------- tiny helpers --------------------------------
+# ------------------------------- helpers -------------------------------------
 if [[ -t 1 ]]; then R=$'\033[31m'; G=$'\033[32m'; Y=$'\033[33m'; B=$'\033[1m'; N=$'\033[0m'; else R=; G=; Y=; B=; N=; fi
-PASS=0; WARN=0; FAIL=0; T0=$SECONDS; NEW_SERVER=""; S3_PROBE_LOG=""
+PASS=0; WARN=0; FAIL=0; PF_PID=""
 ok()   { echo "  ${G}PASS${N}  $*"; PASS=$((PASS+1)); }
 warn() { echo "  ${Y}WARN${N}  $*"; WARN=$((WARN+1)); }
 bad()  { echo "  ${R}FAIL${N}  $*"; FAIL=$((FAIL+1)); }
@@ -68,243 +83,285 @@ step() { echo; echo "${B}==> $*${N}"; }
 die()  { echo "${R}ERROR:${N} $*" >&2; exit 1; }
 has()  { command -v "$1" >/dev/null 2>&1; }
 
-TMP="$(mktemp -d)"; chmod 700 "$TMP"; PF_PID=""
-cleanup() { [[ -n "$PF_PID" ]] && kill "$PF_PID" >/dev/null 2>&1 || true; rm -rf "$TMP"; }
+umask 077
+TMP="$(mktemp -d)"
+pf_stop() { if [[ -n "$PF_PID" ]]; then kill "$PF_PID" >/dev/null 2>&1 || true; fi; PF_PID=""; }
+cleanup() { pf_stop; rm -rf "$TMP"; }
 trap cleanup EXIT
-trap 'echo "${R}ERROR:${N} failed at line $LINENO (see message above)" >&2' ERR
+trap 'echo "${R}ERROR:${N} failed at line $LINENO. Fix the cause and re-run; finished steps are skipped." >&2' ERR
 
-to_mib()   { awk -v v="$1" 'BEGIN{ if(v~/Ki$/){sub(/Ki$/,"",v);print int(v/1024)} else if(v~/Mi$/){sub(/Mi$/,"",v);print int(v)} else if(v~/Gi$/){sub(/Gi$/,"",v);print int(v*1024)} else print int(v/1048576) }'; }
-to_cores() { awk -v v="$1" 'BEGIN{ if(v~/m$/){sub(/m$/,"",v);print v/1000} else print v+0 }'; }
-slug()     { echo "$1" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9\n' '-' | sed 's/--*/-/g; s/^-//; s/-$//' | cut -c1-50; }
-
-# wait_until <seconds> <description> <command...>   (polls every 5s)
+# retry <tries> <sleep> <cmd...>
+retry() { local n=$1 s=$2 i; shift 2; for ((i=1; i<=n; i++)); do if "$@"; then return 0; fi; sleep "$s"; done; return 1; }
+# wait_until <seconds> <what> <cmd...>   (polls every 5s, returns 1 on timeout)
 wait_until() {
-  local t=$1 d=$2; shift 2; local end=$((SECONDS+t))
+  local t=$1 what=$2; shift 2; local end=$((SECONDS+t))
   until "$@" >/dev/null 2>&1; do
-    if (( SECONDS >= end )); then echo "timed out waiting for: $d" >&2; return 1; fi
+    if (( SECONDS >= end )); then echo "timed out waiting for: $what" >&2; return 1; fi
     sleep 5
   done
 }
 wait_crd() { wait_until 900 "CRD $1" kubectl get crd "$1" || die "CRD $1 never appeared"; kubectl wait --for=condition=Established "crd/$1" --timeout=180s >/dev/null; }
 
-app_ok() { kubectl -n argocd get app "$1" -o json 2>/dev/null | jq -e '.status.sync.status=="Synced" and .status.health.status=="Healthy"' >/dev/null 2>&1; }
-# wait until Argo apps are Synced+Healthy; re-trigger a sync every ~2 min if one is stuck
+app_ok() { kubectl -n argocd get application "$1" -o json 2>/dev/null | jq -e '.status.sync.status=="Synced" and .status.health.status=="Healthy"' >/dev/null 2>&1; }
+# wait until the Argo apps are Synced+Healthy; kick a sync every ~2 min if one is stuck
 wait_apps() {
-  local timeout=$1; shift; local end=$((SECONDS+timeout)) kick=$SECONDS a pending
+  local t=$1; shift; local end=$((SECONDS+t)) kick=$SECONDS a pending
   while :; do
-    pending=""
-    for a in "$@"; do app_ok "$a" || pending="$pending $a"; done
-    [[ -z "$pending" ]] && return 0
-    if (( SECONDS >= end )); then echo "Argo apps not ready:$pending" >&2; return 1; fi
+    pending=(); for a in "$@"; do if ! app_ok "$a"; then pending+=("$a"); fi; done
+    if (( ${#pending[@]} == 0 )); then return 0; fi
+    if (( SECONDS >= end )); then echo "Argo apps not ready: ${pending[*]}" >&2; return 1; fi
     if (( SECONDS - kick > 120 )); then
-      for a in $pending; do
-        if ! kubectl -n argocd get app "$a" -o json | jq -e 'has("operation")' >/dev/null 2>&1; then
-          kubectl -n argocd patch app "$a" --type merge -p '{"operation":{"sync":{}}}' >/dev/null 2>&1 || true
-        fi
-      done; kick=$SECONDS
+      for a in "${pending[@]}"; do kubectl -n argocd patch application "$a" --type merge -p '{"operation":{"sync":{}}}' >/dev/null 2>&1 || true; done
+      kick=$SECONDS
     fi
-    log "waiting for Argo apps:$pending"; sleep 15
+    log "waiting for Argo apps: ${pending[*]}"; sleep 15
   done
 }
-
 app_name() { awk '/^  name:/{print $2; exit}' "$1"; }
-# app_file <app-name>  -> path of the manifest that defines that Argo app
-app_file() { local f; for f in "$REPO_DIR"/argocd/apps/*.yaml; do [[ "$(app_name "$f")" == "$1" ]] && { echo "$f"; return 0; }; done; return 1; }
+app_file() { local f; for f in "$REPO"/argocd/apps/*.yaml; do if [[ "$(app_name "$f")" == "$1" ]]; then echo "$f"; return 0; fi; done; return 1; }
+# YAML file -> one compact JSON object per line (needs the CRDs to be installed)
+y2j() { kubectl create --dry-run=client --validate=false -o json -f "$1" | jq -c 'if .kind=="List" then .items[] else . end'; }
+# first file in deploy/base that holds a given kind
+file_of() { { grep -lE "^kind: $1[[:space:]]*\$" "$REPO"/deploy/base/*.yaml 2>/dev/null || true; } | sed -n 1p; }
 
-# Argo app manifests are applied through this so we can swap git@ URLs for https:// (public repo => no SSH key needed)
-apply_app() {
-  if [[ "${REWRITE_HTTPS:-0}" == 1 ]]; then sed -E 's#(repoURL: *)git@([^:]+):#\1https://\2/#' "$1" | kubectl apply -f - >/dev/null
-  else kubectl apply -f "$1" >/dev/null; fi
+pf_start() { kubectl -n "$1" port-forward "$2" "$3:$4" >/dev/null 2>&1 & PF_PID=$!; sleep 4; }
+
+to_mib()   { awk -v v="$1" 'BEGIN{ if(v~/Ki$/){sub(/Ki$/,"",v);print int(v/1024)} else if(v~/Mi$/){sub(/Mi$/,"",v);print int(v)} else if(v~/Gi$/){sub(/Gi$/,"",v);print int(v*1024)} else print int(v/1048576) }'; }
+to_cores() { awk -v v="$1" 'BEGIN{ if(v~/m$/){sub(/m$/,"",v);print v/1000} else print v+0 }'; }
+slug()     { echo "$1" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9\n' '-' | sed 's/--*/-/g; s/^-//; s/-$//' | cut -c1-50; }
+
+confirm() {
+  local ctx a; ctx=$(kubectl config current-context)
+  echo; echo "  kubectl context : ${B}$ctx${N}"
+  echo "  nodes           : $(kubectl get nodes -o name 2>/dev/null | sed 's#node/##' | paste -sd' ')"
+  echo "  mode            : ${B}$MODE${N}   repo: $REPO @ $(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo '?')"
+  echo "  $1"
+  if (( ASSUME_YES )); then return 0; fi
+  [[ -t 0 ]] || die "not a terminal: re-run with --yes"
+  read -r -p "  Type the context name to continue: " a; [[ "$a" == "$ctx" ]] || die "context name did not match, aborting"
+  if [[ "$MODE" == real && "$CMD" == up ]]; then read -r -p "  REAL mode: type REAL to confirm: " a; [[ "$a" == REAL ]] || die "aborting"; fi
 }
 
-ensure_repo() {
-  if [[ ! -d "$REPO_DIR/deploy/base" ]]; then
-    has git || die "git is needed to fetch the repo"
-    if [[ -d "$REPO_DIR/.git" ]]; then git -C "$REPO_DIR" pull --ff-only -q; else git clone -q "$REPO_URL" "$REPO_DIR"; fi
-  fi
-  # shellcheck disable=SC1091
-  if [[ -f "$REPO_DIR/ops/dr-versions.env" ]]; then . "$REPO_DIR/ops/dr-versions.env"; fi
-  return 0
-}
-
-# every object under deploy/base as ONE json array (works for plain dirs and kustomize)
-render_base() {
-  local dir="$REPO_DIR/deploy/base"
-  if [[ -f "$dir/kustomization.yaml" ]]; then kubectl kustomize "$dir" | kubectl create --dry-run=client -o json -f -
-  else kubectl create --dry-run=client -o json -f "$dir"; fi | jq -cs 'map(if .kind=="List" then .items[] else . end)'
-}
-
-# fills CLUSTER_NAME CLUSTER_NS DB_NAME DB_OWNER OBJECTSTORE SOURCE_SERVER from the repo's own manifests
-load_cluster_info() {
-  render_base > "$TMP/all.json"
-  jq -ce 'map(select(.kind=="Cluster"))|first // empty' "$TMP/all.json" > "$TMP/cluster.json" || true
-  [[ -s "$TMP/cluster.json" ]] || die "no Cluster manifest found in deploy/base"
-  CLUSTER_NAME=$(jq -r '.metadata.name' "$TMP/cluster.json")
-  CLUSTER_NS=$(jq -r '.metadata.namespace // "n8n"' "$TMP/cluster.json")
-  DB_NAME=$(jq -r '.spec.bootstrap.initdb.database // "app"' "$TMP/cluster.json")
-  DB_OWNER=$(jq -r '.spec.bootstrap.initdb.owner // "app"' "$TMP/cluster.json")
-  OBJECTSTORE=$(jq -r '[.spec.plugins[]?|select(.name=="barman-cloud.cloudnative-pg.io")|.parameters.barmanObjectName][0] // empty' "$TMP/cluster.json")
-  [[ -n "$OBJECTSTORE" ]] || OBJECTSTORE=$(jq -r 'map(select(.kind=="ObjectStore"))|first|.metadata.name // empty' "$TMP/all.json")
-  [[ -n "$OBJECTSTORE" ]] || die "no ObjectStore found (is the PITR setup in deploy/base?)"
-  PLUGIN_SERVER=$(jq -r '[.spec.plugins[]?|select(.name=="barman-cloud.cloudnative-pg.io")|.parameters.serverName][0] // empty' "$TMP/cluster.json")
-  SOURCE_SERVER="${SOURCE_SERVER_NAME:-${PLUGIN_SERVER:-$CLUSTER_NAME}}"
-}
-
-# Is there a base backup + WAL in S3?  Runs a throw-away aws-cli pod that uses the SAME secret the ObjectStore uses.
-# usage: s3_probe <ns> <objectstore> <serverName>      result text in $S3_PROBE_LOG
-s3_probe() {
-  local ns=$1 os=$2 srv=$3 pod="s3probe-$RANDOM" osj dest ep epflag cmd ph end
-  S3_PROBE_LOG=""
-  osj=$(kubectl -n "$ns" get objectstores.barmancloud.cnpg.io "$os" -o json) || return 1
-  dest=$(jq -r '.spec.configuration.destinationPath' <<<"$osj"); dest=${dest%/}
-  ep=$(jq -r '.spec.configuration.endpointURL // empty' <<<"$osj")
-  epflag=""; [[ -n "$ep" ]] && epflag="--endpoint-url $ep"
-  cmd="set -e; aws s3 ls $epflag '$dest/$srv/base/'; echo ---WALS---; aws s3 ls $epflag '$dest/$srv/wals/' | head -3"
-  jq -n --arg name "$pod" --arg ns "$ns" --arg cmd "$cmd" --argjson os "$osj" '
-    ($os.spec.configuration.s3Credentials // {}) as $c
-    | { apiVersion:"v1", kind:"Pod", metadata:{name:$name, namespace:$ns},
-        spec:{ restartPolicy:"Never", containers:[{ name:"aws", image:"amazon/aws-cli:latest", command:["sh","-c",$cmd],
-          env: ( (if $c.accessKeyId then [{name:"AWS_ACCESS_KEY_ID",valueFrom:{secretKeyRef:{name:$c.accessKeyId.name,key:$c.accessKeyId.key}}}] else [] end)
-               + (if $c.secretAccessKey then [{name:"AWS_SECRET_ACCESS_KEY",valueFrom:{secretKeyRef:{name:$c.secretAccessKey.name,key:$c.secretAccessKey.key}}}] else [] end)
-               + (if $c.region then [{name:"AWS_DEFAULT_REGION",valueFrom:{secretKeyRef:{name:$c.region.name,key:$c.region.key}}}] else [] end) ) }] } }' \
-    | kubectl apply -f - >/dev/null
-  end=$((SECONDS+300)); ph=""
-  while (( SECONDS < end )); do
-    ph=$(kubectl -n "$ns" get pod "$pod" -o jsonpath='{.status.phase}' 2>/dev/null || true)
-    [[ "$ph" == Succeeded || "$ph" == Failed ]] && break
-    sleep 4
+load_versions() {
+  local f="$REPO/dr/versions.env" v
+  [[ -r "$f" ]] || die "missing $f"
+  # shellcheck disable=SC1090
+  . "$f"
+  for v in ARGOCD_VERSION KPS_VERSION SEALED_SECRETS_VERSION; do
+    [[ -n "${!v:-}" && "${!v}" != CHANGE_ME ]] || die "set $v in dr/versions.env"
   done
-  S3_PROBE_LOG=$(kubectl -n "$ns" logs "$pod" 2>&1 || true)
-  kubectl -n "$ns" delete pod "$pod" --wait=false >/dev/null 2>&1 || true
-  [[ "$ph" == Succeeded ]]
+  [[ "${SEALED_SECRETS_INSTALL:-manifest}" == manifest ]] || die "this script installs Sealed Secrets from the release manifest (SEALED_SECRETS_INSTALL=manifest)"
 }
 
-primary_pod() { kubectl -n "$1" get cluster "$2" -o jsonpath='{.status.currentPrimary}'; }
-psql_q() {  # psql_q <ns> <cluster> <db> <sql>
-  kubectl -n "$1" exec "$(primary_pod "$1" "$2")" -c postgres -- psql -U postgres -d "$3" -tAc "$4"
-}
-
-confirm_context() {
-  local ctx; ctx=$(kubectl config current-context)
-  echo; echo "  kubectl context: ${B}$ctx${N}"; echo "  mode: ${B}$MODE${N}   repo: $REPO_DIR @ $(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo '?')"
-  echo "  This will INSTALL a full platform into that cluster."
-  if [[ "$CONFIRM_CONTEXT" == "$ctx" ]]; then return 0; fi
-  [[ -t 0 ]] || die "not a terminal: set CONFIRM_CONTEXT=$ctx to confirm non-interactively"
-  local a; read -r -p "  Type the context name to continue: " a; [[ "$a" == "$ctx" ]] || die "context name did not match, aborting"
-  if [[ "$MODE" == real ]]; then read -r -p "  REAL mode: type REAL to confirm: " a; [[ "$a" == REAL ]] || die "aborting"; fi
+# ----------------------- leftovers of an earlier run -------------------------
+# prints what is left and sets LEFT (call it directly, not inside $(...))
+leftovers() {
+  LEFT=0; local ns x
+  for ns in "${NS_LIST[@]}"; do if kubectl get ns "$ns" >/dev/null 2>&1; then echo "namespace/$ns"; LEFT=$((LEFT+1)); fi; done
+  x=$(kubectl get crd -o name 2>/dev/null | sed 's#.*/##' | grep -E "$CRD_RE" || true)
+  if [[ -n "$x" ]]; then echo "$x" | sed 's#^#crd/#'; LEFT=$((LEFT+$(echo "$x" | wc -l))); fi
+  x=$(kubectl get clusterrole,clusterrolebinding,validatingwebhookconfiguration,mutatingwebhookconfiguration,apiservice -o name 2>/dev/null | grep -E "$CLUSTER_RE" || true)
+  if [[ -n "$x" ]]; then echo "$x"; LEFT=$((LEFT+$(echo "$x" | wc -l))); fi
+  if kubectl -n kube-system get deploy sealed-secrets-controller >/dev/null 2>&1; then echo "kube-system/deploy/sealed-secrets-controller"; LEFT=$((LEFT+1)); fi
 }
 
 # =============================================================================
-#  PRE-DR CHECKS  (read-only: nothing in the target cluster is changed)
+#  CLEAN  (best effort; only for a throw-away DR cluster)
 # =============================================================================
-pre_dr_checks() {
+strip_crs() {  # remove finalizers from every instance of CRD $1 so deletion cannot hang
+  local res=$1 ns name
+  kubectl get "$res" -A -o json 2>/dev/null | jq -r '.items[] | [(.metadata.namespace // ""), .metadata.name] | @tsv' |
+  while IFS=$'\t' read -r ns name; do
+    if [[ -n "$ns" ]]; then kubectl -n "$ns" patch "$res" "$name" --type merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
+    else kubectl patch "$res" "$name" --type merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true; fi
+  done
+}
+
+clean() {
+  step "CLEAN: remove what an earlier DR run left in this cluster"
+  kubectl get ns >/dev/null 2>&1 || die "cluster not reachable"
+  if [[ "$FORCE_CLEAN" != 1 ]] && kubectl -n "$N8N_NS" get cluster.postgresql.cnpg.io -o json 2>/dev/null |
+       jq -e '[.items[]|select((.spec.plugins // [])|length>0)]|length>0' >/dev/null 2>&1; then
+    die "this cluster's Postgres archives WAL to S3: it looks like PRODUCTION or a --real DR cluster. Refusing. (FORCE_CLEAN=1 to override)"
+  fi
+  confirm "This DELETES: namespaces ${NS_LIST[*]}, their CRDs, Sealed Secrets and the Argo/CNPG/KEDA/VPA/cert-manager cluster objects."
+  local a crd ns n rel crds
+
+  if kubectl get crd applications.argoproj.io >/dev/null 2>&1; then
+    for a in $(kubectl -n argocd get applications -o name 2>/dev/null); do kubectl -n argocd patch "$a" --type merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true; done
+    kubectl -n argocd delete applications --all --wait=false --cascade=orphan >/dev/null 2>&1 || true
+  fi
+  if has helm; then
+    for rel in $(helm list -A -o json 2>/dev/null | jq -r '.[]|select(.name=="prometheus" or .name=="sealed-secrets")|"\(.namespace)/\(.name)"'); do
+      log "helm uninstall ${rel#*/} (${rel%/*})"; helm uninstall "${rel#*/}" -n "${rel%/*}" --timeout 2m >/dev/null 2>&1 || true
+    done
+  fi
+  kubectl delete ns "${NS_LIST[@]}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+
+  crds=$(kubectl get crd -o name 2>/dev/null | sed 's#.*/##' | grep -E "$CRD_RE" || true)
+  for crd in $crds; do strip_crs "$crd"; done
+  if [[ -n "$crds" ]]; then
+    # shellcheck disable=SC2086
+    kubectl delete crd $crds --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  fi
+
+  kubectl -n kube-system delete deploy/sealed-secrets-controller svc/sealed-secrets-controller svc/sealed-secrets-controller-metrics \
+    sa/sealed-secrets-controller role/sealed-secrets-service-proxier role/sealed-secrets-key-admin \
+    rolebinding/sealed-secrets-service-proxier rolebinding/sealed-secrets-controller --ignore-not-found >/dev/null 2>&1 || true
+  kubectl -n kube-system delete secret -l sealedsecrets.bitnami.com/sealed-secrets-key --ignore-not-found >/dev/null 2>&1 || true
+  kubectl get clusterrole,clusterrolebinding,validatingwebhookconfiguration,mutatingwebhookconfiguration,apiservice -o name 2>/dev/null |
+    { grep -E "$CLUSTER_RE" || true; } | xargs -r kubectl delete --ignore-not-found --wait=false >/dev/null 2>&1 || true
+
+  log "waiting for namespaces to disappear (stuck ones are force-finalised after 90s)"
+  local t0=$SECONDS
+  while (( SECONDS - t0 < 300 )); do
+    n=0
+    for ns in "${NS_LIST[@]}"; do
+      if kubectl get ns "$ns" >/dev/null 2>&1; then
+        n=$((n+1))
+        if (( SECONDS - t0 > 90 )); then
+          kubectl get ns "$ns" -o json | jq '.spec.finalizers=[]' | kubectl replace --raw "/api/v1/namespaces/$ns/finalize" -f - >/dev/null 2>&1 || true
+        fi
+      fi
+    done
+    if (( n == 0 )); then break; fi
+    sleep 10
+  done
+  # volumes that belonged to the deleted namespaces
+  kubectl get pv -o json 2>/dev/null | jq -r --argjson ns "$(printf '%s\n' "${NS_LIST[@]}" | jq -R . | jq -sc .)" \
+    '.items[] | select(.spec.claimRef.namespace as $c | $ns | index($c)) | .metadata.name' | xargs -r kubectl delete pv --wait=false >/dev/null 2>&1 || true
+
+  step "what is still there"
+  leftovers
+  if (( LEFT == 0 )); then echo "  ${G}cluster is clean${N}"; else echo "  ${Y}$LEFT item(s) left (see above): run clean again, or recreate the cluster${N}"; fi
+}
+
+# =============================================================================
+#  PRE-DR CHECKS  (read-only)
+# =============================================================================
+preflight() {
   step "PRE-DR CHECKS (read-only)"
-  local t f ns found u code
+  local t f u code d age_days list
 
-  echo " tools"
-  for t in kubectl helm jq age rclone git curl; do if has "$t"; then ok "$t installed"; else bad "$t is missing"; fi; done
-  [[ "$FAIL" -eq 0 ]] || die "install the missing tools above, then re-run (nothing was changed)"
+  echo " tools and inputs"
+  for t in kubectl helm jq age rclone curl git; do if has "$t"; then ok "$t installed"; else bad "$t is missing"; fi; done
+  if (( FAIL > 0 )); then die "install the missing tools, then re-run"; fi
+  if [[ -r "$AGE_IDENTITY" ]]; then ok "age identity: $AGE_IDENTITY"; else bad "age identity not found (set AGE_IDENTITY=/path/age-key.txt)"; fi
+  if [[ -r "$RCLONE_CONFIG" ]]; then ok "rclone config: $RCLONE_CONFIG"; else bad "rclone config not found (set RCLONE_CONFIG=/path/rclone.conf)"; fi
+  if (( FAIL > 0 )); then die "fix the inputs above, then re-run"; fi
 
   echo " repo"
-  for f in bootstrap/root.yaml argocd/apps deploy/base ops/keys-restore.sh; do
-    if [[ -e "$REPO_DIR/$f" ]]; then ok "repo has $f"; else bad "repo is missing $f"; fi
+  for f in bootstrap/root.yaml argocd/apps deploy/base dr/versions.env deploy/n8n-values.yaml; do
+    if [[ -e "$REPO/$f" ]]; then ok "repo has $f"; else bad "repo is missing $f"; fi
   done
-  grep -rqsE '^kind: Cluster[[:space:]]*$' "$REPO_DIR/deploy/base"      && ok "repo has a CloudNativePG Cluster manifest" || bad "no 'kind: Cluster' in deploy/base"
-  grep -rqsE '^kind: ObjectStore[[:space:]]*$' "$REPO_DIR/deploy/base"  && ok "repo has an ObjectStore (PITR archive config)" || bad "no 'kind: ObjectStore' in deploy/base - was the PITR setup pushed?"
-  grep -rqsE '^kind: SealedSecret[[:space:]]*$' "$REPO_DIR/deploy/base" && ok "repo has SealedSecrets" || bad "no SealedSecrets in deploy/base"
-  grep -rqsi 'barman' "$REPO_DIR/argocd/apps"            && ok "an Argo app installs the Barman plugin" || bad "no Barman plugin app in argocd/apps"
-  grep -rqsi 'cert-manager' "$REPO_DIR/argocd/apps"      && ok "an Argo app installs cert-manager" || bad "no cert-manager app in argocd/apps (the plugin needs it)"
+  if [[ -n "$(file_of Cluster)" && -n "$(file_of ObjectStore)" ]]; then ok "repo has a Postgres Cluster and an ObjectStore"; else bad "deploy/base needs a Cluster and an ObjectStore"; fi
+  if grep -rqsE 'repoURL: *(git@|ssh://)' "$REPO/argocd/apps" "$REPO/bootstrap"; then bad "an Argo app uses an SSH repo URL; this script only supports https"; fi
+  if git -C "$REPO" fetch -q origin main 2>/dev/null; then
+    if [[ "$(git -C "$REPO" rev-parse HEAD)" == "$(git -C "$REPO" rev-parse origin/main)" ]]; then ok "checkout equals origin/main (Argo deploys GitHub main)"
+    else warn "checkout differs from origin/main: Argo deploys what is on GitHub, not your local files"; fi
+  else warn "could not reach GitHub to compare with origin/main"; fi
+  if [[ -n "$(git -C "$REPO" status --porcelain deploy argocd bootstrap 2>/dev/null)" ]]; then warn "uncommitted changes in deploy/ argocd/ bootstrap/ are NOT deployed by Argo"; fi
+  load_versions
+  ok "pinned versions: argocd=$ARGOCD_VERSION kube-prometheus-stack=$KPS_VERSION sealed-secrets=$SEALED_SECRETS_VERSION"
 
-  echo " backups & keys"
-  if [[ -n "$AGE_IDENTITY" && -r "$AGE_IDENTITY" ]]; then ok "age identity file readable"; else bad "AGE_IDENTITY not set or not readable"; fi
-  DRIVE_LIST=$(rclone lsf "$GDRIVE_PATH/" 2>/dev/null || true)
-  if [[ -n "$DRIVE_LIST" ]]; then ok "Google Drive reachable ($GDRIVE_PATH)"; else bad "cannot list $GDRIVE_PATH (rclone 'gdrive' remote missing or token expired)"; fi
-  KEYS_FILE="${SEALING_KEYS_FILE:-$(printf '%s\n' "$DRIVE_LIST" | grep -E '^sealing-keys-[0-9]{8}\.json\.age$' | sort | tail -1 || true)}"
-  SECRETS_FILE="${N8N_SECRETS_FILE:-$(printf '%s\n' "$DRIVE_LIST" | grep -E '^n8n-secrets-[0-9]{8}\.json\.age$' | sort | tail -1 || true)}"
-  if [[ -n "$KEYS_FILE" && -r "${AGE_IDENTITY:-/nonexistent}" ]]; then
-    if rclone copyto "$GDRIVE_PATH/$KEYS_FILE" "$TMP/keys.age" 2>/dev/null && age -d -i "$AGE_IDENTITY" -o "$TMP/keys.json" "$TMP/keys.age" 2>/dev/null \
-       && jq -e '.items|length>0' "$TMP/keys.json" >/dev/null 2>&1; then
-      ok "$KEYS_FILE decrypts ($(jq '.items|length' "$TMP/keys.json") sealing key(s))"
-    else bad "cannot download/decrypt $KEYS_FILE (wrong age identity?)"; fi
-  else bad "no sealing-keys backup found/decryptable"; fi
-  if [[ -n "$SECRETS_FILE" && -r "${AGE_IDENTITY:-/nonexistent}" ]]; then
-    if rclone copyto "$GDRIVE_PATH/$SECRETS_FILE" "$TMP/ns.age" 2>/dev/null && age -d -i "$AGE_IDENTITY" -o "$TMP/n8n-secrets.json" "$TMP/ns.age" 2>/dev/null \
-       && jq -e '.data.N8N_ENCRYPTION_KEY|length>0' "$TMP/n8n-secrets.json" >/dev/null 2>&1; then
-      ok "$SECRETS_FILE decrypts and contains N8N_ENCRYPTION_KEY"
-    else bad "cannot download/decrypt $SECRETS_FILE or it has no N8N_ENCRYPTION_KEY"; fi
-  else bad "no n8n-secrets backup found/decryptable"; fi
-  for f in "$KEYS_FILE" "$SECRETS_FILE"; do
-    [[ -n "$f" ]] || continue
-    local age_days
-    age_days=$(rclone lsjson "$GDRIVE_PATH/" 2>/dev/null | jq -r --arg n "$f" '.[]|select(.Name==$n)|.ModTime|sub("\\.[0-9]+";"")|fromdateiso8601|((now-.)/86400|floor)' 2>/dev/null || true)
-    if [[ -n "$age_days" && "$age_days" -gt 35 ]]; then warn "$f is $age_days days old (Sealed Secrets rotates keys every ~30 days)"; fi
-  done
-
-  echo " target cluster"
-  local ctx; ctx=$(kubectl config current-context 2>/dev/null || true)
-  if [[ -n "$ctx" ]]; then ok "kubectl context: $ctx"; else die "no kubectl context: point kubectl at the NEW cluster first"; fi
-  if kubectl get ns >/dev/null 2>&1; then ok "cluster reachable"; else die "cluster not reachable with context $ctx"; fi
-  local minor; minor=$(kubectl version -o json 2>/dev/null | jq -r '.serverVersion.minor // empty' | tr -dc '0-9')
-  if [[ -n "$minor" && "$minor" -ge 28 ]]; then ok "Kubernetes 1.$minor"; else warn "Kubernetes version unclear or older than 1.28 (found: 1.${minor:-?})"; fi
-  found=""
-  for ns in argocd "$N8N_NS" cnpg-system redis-ha monitoring cert-manager keda vpa; do kubectl get ns "$ns" >/dev/null 2>&1 && found="$found $ns" || true; done
-  if kubectl -n kube-system get deploy sealed-secrets-controller >/dev/null 2>&1; then found="$found kube-system/sealed-secrets"; fi
-  if [[ -z "$found" ]]; then ok "cluster is empty (no platform namespaces yet)"
-  elif [[ "$ALLOW_NONEMPTY" == 1 ]]; then warn "cluster is not empty:$found (ALLOW_NONEMPTY=1)"
-  else bad "cluster is NOT empty, found:$found. Is this your live cluster? (ALLOW_NONEMPTY=1 to override)"; fi
-  local defsc; defsc=$(kubectl get storageclass -o json | jq '[.items[]|select(.metadata.annotations["storageclass.kubernetes.io/is-default-class"]=="true")]|length')
-  if [[ "$defsc" == 1 ]]; then ok "exactly one default StorageClass"; else bad "need exactly one default StorageClass (found $defsc)"; fi
-  local mem=0 cpu=0 m c
-  for m in $(kubectl get nodes -o jsonpath='{range .items[*]}{.status.allocatable.memory}{"\n"}{end}'); do mem=$((mem+$(to_mib "$m"))); done
-  cpu=$(for c in $(kubectl get nodes -o jsonpath='{range .items[*]}{.status.allocatable.cpu}{"\n"}{end}'); do to_cores "$c"; done | awk '{s+=$1} END{print s+0}')
-  if [[ "$mem" -ge 10240 ]]; then ok "memory available to pods: $((mem/1024)) GiB"; else warn "only $((mem/1024)) GiB memory allocatable; ~12 GiB recommended"; fi
-  if awk -v c="$cpu" 'BEGIN{exit !(c>=4)}'; then ok "CPU available to pods: $cpu cores"; else warn "only $cpu CPU cores allocatable; ~6 recommended"; fi
-
-  echo " network (can this machine / cluster download what we need?)"
-  for u in https://github.com https://raw.githubusercontent.com https://ghcr.io/v2/ https://registry-1.docker.io/v2/ https://quay.io/v2/ \
-           https://charts.jetstack.io/index.yaml https://cloudnative-pg.github.io/charts/index.yaml https://bitnami-labs.github.io/sealed-secrets/index.yaml \
-           https://prometheus-community.github.io/helm-charts/index.yaml https://kedacore.github.io/charts/index.yaml \
-           https://charts.fairwinds.com/stable/index.yaml https://kubernetes-sigs.github.io/metrics-server/index.yaml; do
-    code=$(curl -s -o /dev/null -m 20 -w '%{http_code}' "$u" || true)
-    case "$code" in 2*|3*|401) ok "reachable: $u";; *) bad "cannot reach $u (HTTP ${code:-none})";; esac
-  done
-  if grep -rqs 'repoURL: *git@' "$REPO_DIR/argocd/apps" "$REPO_DIR/bootstrap" 2>/dev/null; then
-    if [[ -n "$ARGOCD_SSH_KEY" && -r "$ARGOCD_SSH_KEY" ]]; then ok "Argo will use your SSH deploy key"
-    else
-      local https; https=$(grep -rhs 'repoURL: *git@' "$REPO_DIR/argocd/apps" "$REPO_DIR/bootstrap" | head -1 | awk '{print $NF}' | sed -E 's#git@([^:]+):#https://\1/#')
-      if git ls-remote "$https" HEAD >/dev/null 2>&1; then ok "repo is public over https; Argo will use https URLs (no SSH key needed)"; else bad "repo not readable over https and no ARGOCD_SSH_KEY given"; fi
+  echo " backups and keys"
+  list=$(rclone lsf "$GDRIVE" --files-only 2>/dev/null || true)
+  if [[ -n "$list" ]]; then ok "Google Drive reachable ($GDRIVE)"; else bad "cannot list $GDRIVE (rclone remote missing or token expired)"; fi
+  if [[ -n "$list" ]]; then
+    d="$BACKUP_DATE"
+    if [[ "$d" == latest ]]; then
+      d=$(comm -12 <(grep -oE '^sealing-keys-[0-9]{8}' <<<"$list" | sed 's/.*-//' | sort -u) \
+                   <(grep -oE '^n8n-secrets-[0-9]{8}' <<<"$list" | sed 's/.*-//' | sort -u) | tail -n 1)
     fi
+    if [[ "$d" =~ ^[0-9]{8}$ ]] && grep -qx "sealing-keys-$d.json.age" <<<"$list" && grep -qx "n8n-secrets-$d.json.age" <<<"$list"; then
+      ok "key backup set dated $d found"
+      if rclone copyto "$GDRIVE/sealing-keys-$d.json.age" "$TMP/keys.age" 2>/dev/null && age -d -i "$AGE_IDENTITY" -o "$TMP/keys.json" "$TMP/keys.age" 2>/dev/null &&
+         jq -e '.kind=="List" and (.items|length)>0 and all(.items[]; .metadata.namespace=="kube-system" and .data["tls.crt"]!=null and .data["tls.key"]!=null)' "$TMP/keys.json" >/dev/null 2>&1
+      then ok "sealing keys decrypt ($(jq '.items|length' "$TMP/keys.json") key(s))"; else bad "cannot download/decrypt a valid sealing-keys backup (wrong age key?)"; fi
+      if rclone copyto "$GDRIVE/n8n-secrets-$d.json.age" "$TMP/n8n.age" 2>/dev/null && age -d -i "$AGE_IDENTITY" -o "$TMP/n8n-secrets.json" "$TMP/n8n.age" 2>/dev/null &&
+         jq -e '.data.N8N_ENCRYPTION_KEY|length>0' "$TMP/n8n-secrets.json" >/dev/null 2>&1
+      then ok "n8n secrets decrypt and contain N8N_ENCRYPTION_KEY"; else bad "cannot download/decrypt the n8n-secrets backup, or it has no N8N_ENCRYPTION_KEY"; fi
+      age_days=$(( ( $(date +%s) - $(date -d "$d" +%s 2>/dev/null || echo 0) ) / 86400 ))
+      if (( age_days > 35 )); then warn "key backup is $age_days days old (Sealed Secrets rotates keys every ~30 days): newer secrets in git may not decrypt"; fi
+    else bad "no matching sealing-keys-DATE + n8n-secrets-DATE pair on Drive (BACKUP_DATE='$BACKUP_DATE')"; fi
   fi
 
-  echo " version pins"
-  for t in ARGOCD_VERSION SEALED_SECRETS_CHART_VERSION PROM_STACK_CHART_VERSION; do
-    if [[ -n "${!t}" ]]; then ok "$t=${!t}"; else warn "$t not pinned (will install the latest; run './dr-up.sh readiness' on production to record versions)"; fi
+  echo " target cluster"
+  local ctx minor defsc mem=0 cpu m c
+  ctx=$(kubectl config current-context 2>/dev/null || true)
+  if [[ -n "$ctx" ]] && kubectl get ns >/dev/null 2>&1; then ok "cluster reachable (context: $ctx)"; else die "no reachable cluster: point kubectl at the NEW cluster first"; fi
+  minor=$(kubectl version -o json 2>/dev/null | jq -r '.serverVersion.minor // empty' | tr -dc '0-9')
+  if [[ -n "$minor" && "$minor" -ge 28 ]]; then ok "Kubernetes 1.$minor"; else warn "Kubernetes version unclear or older than 1.28 (1.${minor:-?})"; fi
+  defsc=$(kubectl get storageclass -o json | jq '[.items[]|select(.metadata.annotations["storageclass.kubernetes.io/is-default-class"]=="true")]|length')
+  if [[ "$defsc" == 1 ]]; then ok "exactly one default StorageClass"; else bad "need exactly one default StorageClass (found $defsc)"; fi
+  for m in $(kubectl get nodes -o jsonpath='{range .items[*]}{.status.allocatable.memory}{"\n"}{end}'); do mem=$((mem+$(to_mib "$m"))); done
+  cpu=$(for c in $(kubectl get nodes -o jsonpath='{range .items[*]}{.status.allocatable.cpu}{"\n"}{end}'); do to_cores "$c"; done | awk '{s+=$1} END{print s+0}')
+  if (( mem >= 10240 )); then ok "memory for pods: $((mem/1024)) GiB"; else warn "only $((mem/1024)) GiB allocatable; the full platform wants ~12 GiB (pods may stay Pending)"; fi
+  if awk -v c="$cpu" 'BEGIN{exit !(c>=4)}'; then ok "CPU for pods: $cpu cores"; else warn "only $cpu CPU cores allocatable; ~6 recommended"; fi
+  leftovers > "$TMP/left.txt"
+  if (( LEFT == 0 )); then ok "cluster is empty (no platform leftovers)"
+  else
+    bad "cluster is NOT empty ($LEFT item(s)). If this is the failed DR cluster run: ./ops/dr-up.sh clean. If it is your live cluster, STOP."
+    sed -n 1,12p "$TMP/left.txt" | sed 's/^/          /'
+  fi
+  if kubectl -n kube-system get deploy metrics-server >/dev/null 2>&1; then log "note: this cluster already has metrics-server; the Argo metrics-server app is skipped when it is not ours"; fi
+
+  echo " network and pinned versions"
+  for u in https://github.com https://raw.githubusercontent.com https://ghcr.io/v2/ https://quay.io/v2/ https://registry-1.docker.io/v2/ \
+           "https://github.com/bitnami/sealed-secrets/releases/download/$SEALED_SECRETS_VERSION/controller.yaml" \
+           "https://raw.githubusercontent.com/argoproj/argo-cd/$ARGOCD_VERSION/manifests/install.yaml"; do
+    code=$(curl -sIL -o /dev/null -m 25 -w '%{http_code}' "$u" || true)
+    case "$code" in 2*|3*|401) ok "reachable: ${u#https://}" ;; *) bad "cannot reach $u (HTTP ${code:-none})" ;; esac
   done
-  [[ -n "$ALERTMANAGER_VALUES" && -r "$ALERTMANAGER_VALUES" ]] && ok "Alertmanager values file found" || warn "no ALERTMANAGER_VALUES: alert routing (Gmail) will NOT be restored"
+  # every chart pinned in argocd/apps (and kube-prometheus-stack) must still exist in its registry
+  local repo chart ver
+  { awk '/repoURL:/{r=$NF} /^ *chart:/{c=$NF} /targetRevision:/{ if(c!=""){print r, c, $NF}; c="" }' "$REPO"/argocd/apps/*.yaml | tr -d '"'
+    echo "https://prometheus-community.github.io/helm-charts kube-prometheus-stack $KPS_VERSION"; } |
+  while read -r repo chart ver; do
+    case "$repo" in
+      http://*|https://*) helm show chart "$chart" --repo "$repo" --version "$ver" >/dev/null 2>&1 ;;
+      *)                  helm show chart "oci://$repo/$chart" --version "$ver" >/dev/null 2>&1 ;;
+    esac && echo "OK $chart $ver" || echo "NO $chart $ver ($repo)"
+  done > "$TMP/charts.txt"
+  while read -r t chart ver rest; do
+    if [[ "$t" == OK ]]; then ok "chart exists: $chart $ver"; else bad "chart NOT found: $chart $ver $rest (removed from the registry? update the pin in git)"; fi
+  done < "$TMP/charts.txt"
+
+  echo " options"
+  if [[ -n "$MONITORING_VALUES" && ! -r "$MONITORING_VALUES" ]]; then bad "MONITORING_VALUES not readable"; fi
+  if [[ -n "$ALERTMANAGER_VALUES" && -r "$ALERTMANAGER_VALUES" ]]; then ok "Alertmanager values file found"; else warn "no ALERTMANAGER_VALUES: alert e-mail routing will NOT be restored"; fi
+  if [[ "$MODE" == drill ]]; then
+    warn "DRILL: the restored n8n will run your ACTIVE workflows (schedules, polling) next to production. START_N8N=0 leaves n8n off."
+  else log "REAL mode: the new WAL archive folder will be <cluster>-dr<timestamp>"; fi
 
   step "pre-DR summary: $PASS passed, $WARN warnings, $FAIL failed"
-  [[ "$FAIL" -eq 0 ]] || die "pre-DR checks failed. Fix the FAIL lines above and re-run (nothing was changed)."
+  if (( FAIL > 0 )); then die "pre-DR checks failed: fix the FAIL lines above (nothing was changed)"; fi
 }
 
 # =============================================================================
 #  BUILD
 # =============================================================================
-setup_argocd_access() {
+step_sealed_secrets() {
+  step "1/8 Restore the Sealed Secrets keys, then install the controller"
+  kubectl apply -f "$TMP/keys.json" >/dev/null
+  retry 5 10 kubectl apply -f "https://github.com/bitnami/sealed-secrets/releases/download/$SEALED_SECRETS_VERSION/controller.yaml" >/dev/null
+  kubectl -n kube-system rollout status deploy/sealed-secrets-controller --timeout=300s >/dev/null
+  log "controller ready; keys in cluster: $(kubectl -n kube-system get secret -l sealedsecrets.bitnami.com/sealed-secrets-key --no-headers | wc -l | tr -d ' ')"
+}
+
+step_argocd() {
+  step "2/8 Install Argo CD $ARGOCD_VERSION"
+  kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  kubectl apply -n argocd --server-side --force-conflicts -f "https://raw.githubusercontent.com/argoproj/argo-cd/$ARGOCD_VERSION/manifests/install.yaml" >/dev/null
+  wait_crd applications.argoproj.io
+  kubectl -n argocd wait --for=condition=Available deploy --all --timeout=600s >/dev/null
+  kubectl -n argocd rollout status statefulset/argocd-application-controller --timeout=300s >/dev/null
+  # apps whose repoURL has no scheme are OCI registries (ghcr.io/..., registry-1.docker.io/...): Argo needs them registered
   local u s
-  REWRITE_HTTPS=0
-  for u in $(cat "$REPO_DIR"/argocd/apps/*.yaml "$REPO_DIR"/bootstrap/root.yaml | awk '/repoURL:/{print $NF}' | sort -u); do
-    case "$u" in
-      git@*|ssh://*)
-        if [[ -n "$ARGOCD_SSH_KEY" ]]; then
-          s="repo-$(slug "$u")"
-          kubectl -n argocd create secret generic "$s" --from-literal=type=git --from-literal=url="$u" --from-file=sshPrivateKey="$ARGOCD_SSH_KEY" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-          kubectl -n argocd label secret "$s" argocd.argoproj.io/secret-type=repository --overwrite >/dev/null
-          log "registered SSH repo $u"
-        else REWRITE_HTTPS=1; fi ;;
-      http://*|https://*) : ;;
-      *)  # no scheme => an OCI registry (ghcr.io/..., registry-1.docker.io/...)
-        s="repo-oci-$(slug "$u")"
-        kubectl apply -f - >/dev/null <<EOF
+  for u in $(cat "$REPO"/argocd/apps/*.yaml "$REPO"/bootstrap/root.yaml | awk '/repoURL:/{print $NF}' | tr -d '"' | sort -u); do
+    case "$u" in http://*|https://*) continue ;; esac
+    s="repo-oci-$(slug "$u")"
+    kubectl apply -f - >/dev/null <<EOF
 apiVersion: v1
 kind: Secret
 metadata:
@@ -318,228 +375,301 @@ stringData:
   url: $u
   enableOCI: "true"
 EOF
-        log "registered OCI registry $u" ;;
-    esac
+    log "registered OCI registry $u"
   done
-  [[ "$REWRITE_HTTPS" == 1 ]] && log "apps will use https:// repo URLs (public repo)" || true
 }
 
-build() {
-  confirm_context
-  local BASE_NS; BASE_NS=$(awk '/^  destination:/{d=1} d && /namespace:/{print $2; exit}' "$(app_file n8n-base)" 2>/dev/null || true); BASE_NS=${BASE_NS:-$N8N_NS}
-
-  step "1/10 Restore the Sealed Secrets private keys (BEFORE the controller exists, so it adopts them)"
-  kubectl apply -f "$TMP/keys.json" >/dev/null
-  log "$(kubectl -n kube-system get secret -l sealedsecrets.bitnami.com/sealed-secrets-key --no-headers | wc -l | tr -d ' ') key secret(s) in kube-system"
-
-  step "2/10 Install the Sealed Secrets controller"
-  local va=(); [[ -n "$SEALED_SECRETS_CHART_VERSION" ]] && va=(--version "$SEALED_SECRETS_CHART_VERSION")
-  helm repo add sealed-secrets https://bitnami-labs.github.io/sealed-secrets --force-update >/dev/null
-  helm upgrade --install sealed-secrets sealed-secrets/sealed-secrets -n kube-system --set fullnameOverride=sealed-secrets-controller \
-    ${va[@]+"${va[@]}"} --wait --timeout 5m >/dev/null
-  log "controller ready"
-
-  step "3/10 Install Argo CD ${ARGOCD_VERSION:-(latest stable)}"
-  kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-  kubectl apply -n argocd --server-side --force-conflicts -f "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_VERSION:-stable}/manifests/install.yaml" >/dev/null
-  kubectl -n argocd rollout status deploy/argocd-repo-server --timeout=300s >/dev/null
-  kubectl -n argocd rollout status deploy/argocd-server --timeout=300s >/dev/null
-  kubectl -n argocd rollout status statefulset/argocd-application-controller --timeout=300s >/dev/null
-  wait_crd applications.argoproj.io
-  setup_argocd_access
-
-  step "4/10 Install kube-prometheus-stack (provides the ServiceMonitor/PrometheusRule CRDs your repo uses)"
-  local vp=() vv=(); [[ -n "$PROM_STACK_CHART_VERSION" ]] && vp=(--version "$PROM_STACK_CHART_VERSION")
-  [[ -n "$ALERTMANAGER_VALUES" && -r "$ALERTMANAGER_VALUES" ]] && vv=(-f "$ALERTMANAGER_VALUES")
+step_monitoring() {
+  step "3/8 Install kube-prometheus-stack $KPS_VERSION (ServiceMonitor/PrometheusRule CRDs and Prometheus)"
+  local args=() c
+  if [[ -n "$MONITORING_VALUES" ]]; then args+=(-f "$MONITORING_VALUES")
+  else args+=(--set kubeControllerManager.enabled=false --set kubeScheduler.enabled=false --set kubeEtcd.enabled=false --set kubeProxy.enabled=false); fi
+  if [[ -n "$ALERTMANAGER_VALUES" && -r "$ALERTMANAGER_VALUES" ]]; then args+=(-f "$ALERTMANAGER_VALUES"); fi
   helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update >/dev/null
-  helm upgrade --install prometheus prometheus-community/kube-prometheus-stack -n monitoring --create-namespace \
-    ${vp[@]+"${vp[@]}"} ${vv[@]+"${vv[@]}"} --timeout 10m >/dev/null
+  helm upgrade --install prometheus prometheus-community/kube-prometheus-stack --version "$KPS_VERSION" -n monitoring --create-namespace "${args[@]}" --timeout 10m >/dev/null
   for c in servicemonitors podmonitors prometheusrules; do wait_crd "$c.monitoring.coreos.com"; done
   kubectl -n monitoring rollout status deploy/prometheus-kube-prometheus-operator --timeout=600s >/dev/null
+}
 
-  step "5/10 Install platform apps from git (operators, cert-manager, Barman plugin, KEDA, VPA, ...)"
-  local platform="" f name
-  for f in "$REPO_DIR"/argocd/apps/*.yaml; do
+step_platform() {
+  step "4/8 Install the platform apps from git (cert-manager, CNPG + Barman plugin, KEDA, VPA, metrics-server)"
+  local f name apps=() d
+  for f in "$REPO"/argocd/apps/*.yaml; do
     name=$(app_name "$f")
-    case "$name" in n8n|n8n-base|redis-ha) continue ;; esac   # these three are started later, in order
-    apply_app "$f"; platform="$platform $name"
+    case "$name" in n8n|n8n-base|redis-ha) continue ;; esac
+    if [[ "$name" == metrics-server ]] && kubectl -n kube-system get deploy metrics-server >/dev/null 2>&1 &&
+       [[ -z "$(kubectl -n kube-system get deploy metrics-server -o jsonpath='{.metadata.annotations.argocd\.argoproj\.io/tracking-id}' 2>/dev/null)" ]]; then
+      log "skipping metrics-server: the cluster already provides one"; continue
+    fi
+    kubectl apply -f "$f" >/dev/null; apps+=("$name")
   done
-  # shellcheck disable=SC2086
-  wait_apps 1800 $platform || die "platform apps did not become healthy (check: kubectl -n argocd get app)"
-  for c in clusters.postgresql.cnpg.io objectstores.barmancloud.cnpg.io; do wait_crd "$c"; done
-  for c in scaledobjects.keda.sh verticalpodautoscalers.autoscaling.k8s.io; do wait_crd "$c"; done
+  wait_apps 1800 "${apps[@]}" || die "platform apps did not become healthy (kubectl -n argocd get app)"
+  wait_crd clusters.postgresql.cnpg.io; wait_crd objectstores.barmancloud.cnpg.io
+  wait_crd scaledobjects.keda.sh; wait_crd verticalpodautoscalers.autoscaling.k8s.io
   for d in $(kubectl -n cnpg-system get deploy -o name); do kubectl -n cnpg-system rollout status "$d" --timeout=300s >/dev/null; done
   log "operators and the Barman plugin are running"
-  load_cluster_info     # needs the CRDs installed above to read the repo manifests
+}
 
-  step "6/10 Apply deploy/base (secrets, ObjectStore, policies, proxy ...) - everything EXCEPT the Postgres Cluster"
-  jq -c --arg ns "$BASE_NS" '
-      [ .[] | select([.kind] | inside(["Cluster","ScheduledBackup","CronJob","Job","Backup"]) | not) ]
-      | map( if (.metadata.namespace == null and ([.kind] | inside(["Namespace","ClusterRole","ClusterRoleBinding","CustomResourceDefinition","StorageClass","PersistentVolume","ClusterIssuer"]) | not))
-             then .metadata.namespace = $ns else . end )
-      | sort_by(if .kind=="Namespace" then 0 else 1 end)' "$TMP/all.json" > "$TMP/base.json"
-  local ns
-  for ns in $(jq -r --arg cns "$CLUSTER_NS" '([.[]|select(.kind=="Namespace")|.metadata.name]) as $def
-        | ([.[]|.metadata.namespace // empty] + [$cns]) | unique | map(select(. as $n | ($def|index($n))|not)) | .[]' "$TMP/base.json"); do
-    kubectl get ns "$ns" >/dev/null 2>&1 || kubectl create ns "$ns" >/dev/null
-  done
-  jq '{apiVersion:"v1",kind:"List",items:.}' "$TMP/base.json" | kubectl apply -f - >/dev/null
-  log "applied $(jq length "$TMP/base.json") objects; skipped Cluster/ScheduledBackup/CronJobs on purpose"
+step_base() {
+  step "5/8 Apply deploy/base through Argo (everything except the Postgres Cluster)"
+  local skip="Cluster|CronJob" files
+  if [[ "$MODE" == drill ]]; then skip="$skip|ScheduledBackup"; fi
+  files=$(grep -lE "^kind: ($skip)[[:space:]]*\$" "$REPO"/deploy/base/*.yaml | xargs -n1 basename | paste -sd,)
+  log "left out on purpose: $files"
+  kubectl create namespace "$REDIS_NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  y2j "$(app_file n8n-base)" | jq --arg ex "{$files}" '.spec.source.directory = ((.spec.source.directory // {}) + {exclude: $ex})' | kubectl apply -f - >/dev/null
 
-  step "7/10 Decrypt secrets + verify the n8n encryption key matches your backup"
-  wait_until 300 "SealedSecrets to unseal" bash -c "! kubectl get sealedsecrets.bitnami.com -A -o json | jq -e '[.items[]|select(([.status.conditions[]?|select(.type==\"Synced\" and .status==\"True\")]|length)==0)]|length>0' >/dev/null" \
-    || { kubectl get sealedsecrets.bitnami.com -A; die "some SealedSecrets did not decrypt: the restored sealing keys do not match what the repo was sealed with"; }
+  wait_until 600 "SealedSecrets to exist" bash -c "[ \"\$(kubectl get sealedsecrets.bitnami.com -A --no-headers 2>/dev/null | wc -l)\" -ge 1 ]" ||
+    die "n8n-base created no SealedSecrets (kubectl -n argocd describe app n8n-base)"
+  wait_until 300 "every SealedSecret to decrypt" bash -c "! kubectl get sealedsecrets.bitnami.com -A -o json | jq -e '[.items[]|select(([.status.conditions[]?|select(.type==\"Synced\" and .status==\"True\")]|length)==0)]|length>0' >/dev/null" ||
+    { kubectl get sealedsecrets.bitnami.com -A; die "some SealedSecrets did not decrypt: the restored keys do not match what git was sealed with"; }
   local live want
-  live=$(kubectl -n "$N8N_NS" get secret "$N8N_SECRET_NAME" -o jsonpath='{.data.N8N_ENCRYPTION_KEY}' 2>/dev/null || true)
+  live=$(kubectl -n "$N8N_NS" get secret "$SECRET_NAME" -o jsonpath='{.data.N8N_ENCRYPTION_KEY}' 2>/dev/null || true)
   want=$(jq -r '.data.N8N_ENCRYPTION_KEY' "$TMP/n8n-secrets.json")
-  [[ -n "$live" && "$live" == "$want" ]] || die "N8N_ENCRYPTION_KEY from git (SealedSecret) != the one in your Drive backup. Restored credentials would be unreadable. Stop and investigate."
-  log "all SealedSecrets decrypted; encryption key matches the backup"
+  [[ -n "$live" && "$live" == "$want" ]] || die "N8N_ENCRYPTION_KEY in git (SealedSecret) != your Drive backup: restored credentials would be unreadable. Stop and investigate."
+  log "all SealedSecrets decrypted; the encryption key matches your backup"
+}
 
-  step "8/10 Restore Postgres from the S3 archive (Barman recovery)  [mode: $MODE${TARGET_TIME:+, target $TARGET_TIME}]"
-  NEW_SERVER=""
-  if s3_probe "$CLUSTER_NS" "$OBJECTSTORE" "$SOURCE_SERVER"; then
-    log "S3 archive reachable: $(printf '%s\n' "$S3_PROBE_LOG" | sed '/---WALS---/,$d' | grep -c PRE || true) base backup(s) found for '$SOURCE_SERVER'"
-  else echo "$S3_PROBE_LOG" >&2; die "cannot find a base backup + WAL for '$SOURCE_SERVER' in S3 (wrong credentials, bucket or serverName?)"; fi
-  [[ "$MODE" == real ]] && NEW_SERVER="${CLUSTER_NAME}-dr$(date -u +%Y%m%d%H%M)"
-  jq --arg os "$OBJECTSTORE" --arg src "$SOURCE_SERVER" --arg db "$DB_NAME" --arg owner "$DB_OWNER" --arg target "$TARGET_TIME" --arg mode "$MODE" --arg newsrv "$NEW_SERVER" '
-      .spec.bootstrap = { recovery: ({source:"origin", database:$db, owner:$owner} + (if $target=="" then {} else {recoveryTarget:{targetTime:$target}} end)) }
-      | .spec.externalClusters = [{name:"origin", plugin:{name:"barman-cloud.cloudnative-pg.io", parameters:{barmanObjectName:$os, serverName:$src}}}]
-      | (if $mode=="real"
-           then .spec.plugins = [{name:"barman-cloud.cloudnative-pg.io", isWALArchiver:true, parameters:{barmanObjectName:$os, serverName:$newsrv}}]
-           else del(.spec.plugins) end)
-      | del(.metadata.annotations, .metadata.creationTimestamp, .metadata.uid, .metadata.resourceVersion, .status)' "$TMP/cluster.json" > "$TMP/cluster-recovery.json"
-  kubectl apply -f "$TMP/cluster-recovery.json" >/dev/null
-  log "recovery started; this can take a while (timeout ${RECOVERY_TIMEOUT}s)"
+# cluster facts come from the repo's own Cluster manifest
+load_cluster_info() {
+  local f; f=$(file_of Cluster); [[ -n "$f" ]] || die "no Cluster manifest in deploy/base"
+  y2j "$f" | sed -n 1p > "$TMP/cluster.json"
+  CL=$(jq -r '.metadata.name' "$TMP/cluster.json")
+  CLNS=$(jq -r '.metadata.namespace // "n8n"' "$TMP/cluster.json")
+  DB=$(jq -r '.spec.bootstrap.initdb.database // "app"' "$TMP/cluster.json")
+  OWNER=$(jq -r '.spec.bootstrap.initdb.owner // "app"' "$TMP/cluster.json")
+  OS=$(jq -r --arg p "$PLUGIN" '[.spec.plugins[]? | select(.name==$p) | .parameters.barmanObjectName][0] // empty' "$TMP/cluster.json")
+  [[ -n "$OS" ]] || die "the Cluster manifest has no $PLUGIN plugin / barmanObjectName"
+  GIT_SERVER=$(jq -r --arg p "$PLUGIN" '[.spec.plugins[]? | select(.name==$p) | .parameters.serverName][0] // empty' "$TMP/cluster.json")
+  SRC="${SOURCE_SERVER:-${GIT_SERVER:-$CL}}"
+}
+
+# run a shell command in a throw-away rclone pod that has the ObjectStore's own S3 credentials ($DEST = bucket/path)
+s3_run() {
+  local pod="dr-s3probe-$RANDOM" osj ph="" end
+  osj=$(kubectl -n "$CLNS" get objectstores.barmancloud.cnpg.io "$OS" -o json)
+  jq -n --arg name "$pod" --arg ns "$CLNS" --arg cmd "$1" --argjson os "$osj" '
+    ($os.spec.configuration) as $c | ($c.destinationPath | sub("^s3://";"") | sub("/$";"")) as $dest |
+    { apiVersion:"v1", kind:"Pod", metadata:{name:$name, namespace:$ns, labels:{app:"dr-s3probe"}},
+      spec:{ restartPolicy:"Never", automountServiceAccountToken:false,
+        securityContext:{runAsNonRoot:true, runAsUser:26, runAsGroup:26, seccompProfile:{type:"RuntimeDefault"}},
+        containers:[{ name:"rclone", image:"rclone/rclone:1.68.2", command:["sh","-c",$cmd],
+          securityContext:{allowPrivilegeEscalation:false, capabilities:{drop:["ALL"]}},
+          env:([{name:"HOME",value:"/tmp"}, {name:"DEST",value:$dest}, {name:"RCLONE_CONFIG_S3_TYPE",value:"s3"},
+                {name:"RCLONE_CONFIG_S3_PROVIDER",value:(if $c.endpointURL then "Other" else "AWS" end)},
+                {name:"RCLONE_CONFIG_S3_NO_CHECK_BUCKET",value:"true"},
+                {name:"RCLONE_CONFIG_S3_ACCESS_KEY_ID",valueFrom:{secretKeyRef:{name:$c.s3Credentials.accessKeyId.name,key:$c.s3Credentials.accessKeyId.key}}},
+                {name:"RCLONE_CONFIG_S3_SECRET_ACCESS_KEY",valueFrom:{secretKeyRef:{name:$c.s3Credentials.secretAccessKey.name,key:$c.s3Credentials.secretAccessKey.key}}}]
+               + (if $c.s3Credentials.region then [{name:"RCLONE_CONFIG_S3_REGION",valueFrom:{secretKeyRef:{name:$c.s3Credentials.region.name,key:$c.s3Credentials.region.key}}}] else [] end)
+               + (if $c.endpointURL then [{name:"RCLONE_CONFIG_S3_ENDPOINT",value:$c.endpointURL}] else [] end)) }] } }' |
+    kubectl apply -f - >/dev/null
+  end=$((SECONDS+240))
+  while (( SECONDS < end )); do
+    ph=$(kubectl -n "$CLNS" get pod "$pod" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+    if [[ "$ph" == Succeeded || "$ph" == Failed ]]; then break; fi
+    sleep 4
+  done
+  kubectl -n "$CLNS" logs "$pod" 2>&1 || true
+  kubectl -n "$CLNS" delete pod "$pod" --wait=false >/dev/null 2>&1 || true
+  [[ "$ph" == Succeeded ]]
+}
+
+primary()  { kubectl -n "$CLNS" get cluster "$CL" -o jsonpath='{.status.currentPrimary}'; }
+psql_q()   { kubectl -n "$CLNS" exec "$(primary)" -c postgres -- psql -U postgres -d "$1" -tAc "$2"; }   # psql_q <db> <sql>
+
+step_database() {
+  step "6/8 Restore Postgres from the S3 archive  [mode: $MODE${TARGET_TIME:+, target $TARGET_TIME}]"
+  load_cluster_info
+  if (( FRESH_DB )) && kubectl -n "$CLNS" get cluster "$CL" >/dev/null 2>&1; then
+    log "--fresh-db: deleting the existing $CL"
+    kubectl -n "$CLNS" delete cluster "$CL" --wait=true --timeout=300s >/dev/null
+    kubectl -n "$CLNS" delete pvc -l "cnpg.io/cluster=$CL" --wait=true --timeout=300s >/dev/null 2>&1 || true
+  fi
+  if kubectl -n "$CLNS" get cluster "$CL" >/dev/null 2>&1; then
+    log "Cluster $CL already exists: not touching it (use --fresh-db to redo the restore)"
+  else
+    local probe folders nb nw
+    probe=$(s3_run 'echo "---SERVERS---"; rclone lsf "s3:$DEST/" --dirs-only; echo "---BASE---"; rclone lsf "s3:$DEST/'"$SRC"'/base/" --dirs-only; echo "---WALS---"; rclone lsf "s3:$DEST/'"$SRC"'/wals/" --dirs-only | sed -n 1,3p') ||
+      { echo "$probe" >&2; die "cannot read the S3 archive (wrong credentials or bucket?)"; }
+    folders=$(sed -n '/---SERVERS---/,/---BASE---/p' <<<"$probe" | { grep -v -- '---' || true; } | tr -d '/' | paste -sd' ')
+    nb=$(sed -n '/---BASE---/,/---WALS---/p' <<<"$probe" | { grep -v -- '---' || true; } | wc -l | tr -d ' ')
+    nw=$(sed -n '/---WALS---/,$p' <<<"$probe" | { grep -v -- '---' || true; } | wc -l | tr -d ' ')
+    log "S3 server folders: ${folders:-none}"
+    if [[ "$nb" -ge 1 && "$nw" -ge 1 ]]; then ok "S3 archive '$SRC' holds base backup(s) and WAL"
+    else die "no base backup + WAL under '$SRC' (folders: ${folders:-none}). Pick one with SOURCE_SERVER=<folder>"; fi
+    if [[ "$MODE" == real ]]; then NEW_SERVER="${CL}-dr$(date -u +%Y%m%d%H%M)"; fi
+    jq --arg os "$OS" --arg src "$SRC" --arg db "$DB" --arg owner "$OWNER" --arg t "$TARGET_TIME" --arg new "$NEW_SERVER" --arg p "$PLUGIN" '
+        .spec.bootstrap = { recovery: ({source:"origin", database:$db, owner:$owner} + (if $t=="" then {} else {recoveryTarget:{targetTime:$t}} end)) }
+        | .spec.externalClusters = [{name:"origin", plugin:{name:$p, parameters:{barmanObjectName:$os, serverName:$src}}}]
+        | (if $new=="" then del(.spec.plugins)
+           else .spec.plugins = [{name:$p, isWALArchiver:true, parameters:{barmanObjectName:$os, serverName:$new}}] end)
+        | del(.status, .metadata.uid, .metadata.resourceVersion, .metadata.creationTimestamp, .metadata.annotations)' \
+      "$TMP/cluster.json" > "$TMP/cluster-recovery.json"
+    retry 10 15 kubectl apply -f "$TMP/cluster-recovery.json" >/dev/null || die "could not create the Cluster (operator webhook not ready?)"
+    log "recovery started (timeout ${RECOVERY_TIMEOUT}s): restoring from '$SRC'${NEW_SERVER:+, archiving to '$NEW_SERVER'}"
+  fi
   local end=$((SECONDS+RECOVERY_TIMEOUT)) ready inst phase
   while :; do
-    phase=$(kubectl -n "$CLUSTER_NS" get cluster "$CLUSTER_NAME" -o jsonpath='{.status.phase}' 2>/dev/null || true)
-    ready=$(kubectl -n "$CLUSTER_NS" get cluster "$CLUSTER_NAME" -o jsonpath='{.status.readyInstances}' 2>/dev/null || true)
-    inst=$(kubectl -n "$CLUSTER_NS" get cluster "$CLUSTER_NAME" -o jsonpath='{.spec.instances}' 2>/dev/null || true)
-    log "cluster phase: ${phase:-pending}  ready: ${ready:-0}/${inst:-?}"
+    phase=$(kubectl -n "$CLNS" get cluster "$CL" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+    ready=$(kubectl -n "$CLNS" get cluster "$CL" -o jsonpath='{.status.readyInstances}' 2>/dev/null || true)
+    inst=$(kubectl -n "$CLNS" get cluster "$CL" -o jsonpath='{.spec.instances}' 2>/dev/null || true)
+    log "cluster phase: ${phase:-pending}   ready: ${ready:-0}/${inst:-?}"
     if [[ -n "$inst" && "${ready:-0}" == "$inst" ]]; then break; fi
-    if kubectl -n "$CLUSTER_NS" get pods -l cnpg.io/jobRole=full-recovery -o json 2>/dev/null | jq -e '[.items[]|select(.status.phase=="Failed")]|length>0' >/dev/null 2>&1; then
-      kubectl -n "$CLUSTER_NS" logs -l cnpg.io/jobRole=full-recovery --all-containers --tail=40 >&2 || true
-      die "the recovery job failed (log above). Common causes: targetTime outside the archived range, bad S3 credentials."
+    if kubectl -n "$CLNS" get pods -l cnpg.io/jobRole=full-recovery -o json 2>/dev/null | jq -e '[.items[]|select(.status.phase=="Failed")]|length>0' >/dev/null 2>&1; then
+      kubectl -n "$CLNS" logs -l cnpg.io/jobRole=full-recovery --all-containers --tail=40 >&2 || true
+      die "the recovery job failed (log above). Typical causes: TARGET_TIME outside the archived range, wrong SOURCE_SERVER, bad S3 credentials. Fix, then re-run with --fresh-db."
     fi
-    (( SECONDS < end )) || die "database restore timed out after ${RECOVERY_TIMEOUT}s (kubectl -n $CLUSTER_NS describe cluster $CLUSTER_NAME)"
+    if (( SECONDS >= end )); then die "database restore timed out (kubectl -n $CLNS describe cluster $CL)"; fi
     sleep 30
   done
-
-  step "9/10 Sanity-check the restored data BEFORE starting n8n"
+  if [[ "$MODE" == real && -z "$NEW_SERVER" ]]; then
+    NEW_SERVER=$(kubectl -n "$CLNS" get cluster "$CL" -o json | jq -r --arg p "$PLUGIN" '[.spec.plugins[]? | select(.name==$p) | .parameters.serverName][0] // empty')
+  fi
   local wf cr last
-  wf=$(psql_q "$CLUSTER_NS" "$CLUSTER_NAME" "$DB_NAME" 'select count(*) from workflow_entity;' 2>/dev/null || echo "?")
-  cr=$(psql_q "$CLUSTER_NS" "$CLUSTER_NAME" "$DB_NAME" 'select count(*) from credentials_entity;' 2>/dev/null || echo "?")
-  last=$(psql_q "$CLUSTER_NS" "$CLUSTER_NAME" "$DB_NAME" 'select coalesce(max("startedAt")::text,'"'"'none'"'"') from execution_entity;' 2>/dev/null || echo "?")
-  log "workflows=$wf  credentials=$cr  newest execution=$last"
-  [[ "$wf" =~ ^[0-9]+$ && "$wf" -gt 0 ]] || die "restored database has no workflows (or the table is missing): wrong backup, serverName or targetTime?"
+  wf=$(psql_q "$DB" 'select count(*) from workflow_entity' 2>/dev/null || echo "?")
+  cr=$(psql_q "$DB" 'select count(*) from credentials_entity' 2>/dev/null || echo "?")
+  last=$(psql_q "$DB" "select coalesce(max(\"startedAt\")::text,'none') from execution_entity" 2>/dev/null || echo "?")
+  log "restored data: workflows=$wf credentials=$cr newest execution=$last"
+  [[ "$wf" =~ ^[0-9]+$ && "$wf" -gt 0 ]] || die "the restored database has no workflows: wrong backup, SOURCE_SERVER or TARGET_TIME?"
+}
 
-  step "10/10 Start Redis, then n8n"
-  apply_app "$(app_file redis-ha)"
+step_apps() {
+  step "7/8 Start Redis, then n8n"
+  kubectl apply -f "$(app_file redis-ha)" >/dev/null
   wait_apps 1500 redis-ha || die "redis-ha did not become healthy"
-  apply_app "$(app_file n8n)"
-  wait_apps 1200 n8n || warn "n8n Argo app not Healthy yet; post-DR checks will show details"
-  local d
-  for d in $(kubectl -n "$N8N_NS" get deploy -o name); do kubectl -n "$N8N_NS" rollout status "$d" --timeout=600s >/dev/null || warn "$d not fully rolled out yet"; done
+  local p d
+  for p in $(kubectl -n "$CLNS" get pooler.postgresql.cnpg.io -o name 2>/dev/null); do
+    wait_until 300 "pooler deployment ${p#*/}" kubectl -n "$CLNS" get deploy "${p#*/}" || true
+    kubectl -n "$CLNS" rollout status "deploy/${p#*/}" --timeout=300s >/dev/null || warn "pooler ${p#*/} not ready"
+  done
+  if [[ "$START_N8N" != 1 ]]; then warn "START_N8N=$START_N8N: n8n was NOT started"; return 0; fi
+  kubectl apply -f "$(app_file n8n)" >/dev/null
+  wait_apps 1200 n8n || warn "the n8n Argo app is not Healthy yet; the post-DR checks will show details"
+  for d in $(kubectl -n "$N8N_NS" get deploy -o name); do kubectl -n "$N8N_NS" rollout status "$d" --timeout=600s >/dev/null || warn "$d not fully rolled out"; done
+}
 
-  if [[ "$MODE" == real ]]; then
-    step "REAL mode: take a fresh base backup so the NEW archive ('$NEW_SERVER') is recoverable"
-    local bk="dr-initial-$(date -u +%Y%m%d%H%M%S)"
-    kubectl apply -f - >/dev/null <<EOF
+step_real_backup() {
+  if [[ "$MODE" != real ]]; then return 0; fi
+  step "8/8 REAL mode: take a first base backup so the NEW archive is recoverable"
+  local bk; bk="dr-initial-$(date -u +%Y%m%d%H%M%S)"
+  kubectl apply -f - >/dev/null <<EOF
 apiVersion: postgresql.cnpg.io/v1
 kind: Backup
-metadata: { name: $bk, namespace: $CLUSTER_NS }
+metadata: { name: $bk, namespace: $CLNS }
 spec:
-  cluster: { name: $CLUSTER_NAME }
+  cluster: { name: $CL }
   method: plugin
-  pluginConfiguration: { name: barman-cloud.cloudnative-pg.io }
+  pluginConfiguration: { name: $PLUGIN }
 EOF
-    wait_until 1500 "base backup $bk" bash -c "[ \"\$(kubectl -n $CLUSTER_NS get backup $bk -o jsonpath='{.status.phase}')\" = completed ]" \
-      && log "base backup $bk completed" || warn "base backup $bk not completed yet (kubectl -n $CLUSTER_NS get backup)"
-  fi
+  if wait_until 1500 "backup $bk" bash -c "[ \"\$(kubectl -n $CLNS get backup $bk -o jsonpath='{.status.phase}')\" = completed ]"; then log "base backup $bk completed"
+  else warn "base backup $bk not completed yet (kubectl -n $CLNS get backup)"; fi
 }
 
 # =============================================================================
 #  POST-DR CHECKS  (read-only)
 # =============================================================================
-post_dr_checks() {
+post_checks() {
   step "POST-DR CHECKS"
   PASS=0; WARN=0; FAIL=0
-  [[ -s "$TMP/cluster.json" ]] || load_cluster_info
-  local lines p inst ready n
+  if [[ ! -s "$TMP/cluster.json" ]]; then load_cluster_info; fi
+  local x inst ready n wf cr last p rpw rpod code
 
-  echo " GitOps / secrets"
-  lines=$(kubectl -n argocd get app -o json | jq -r '.items[]|select(.status.sync.status!="Synced" or .status.health.status!="Healthy")|"\(.metadata.name) sync=\(.status.sync.status) health=\(.status.health.status)"')
-  if [[ -z "$lines" ]]; then ok "all Argo apps Synced + Healthy"; else warn "Argo apps not green: $(echo "$lines" | tr '\n' ';')"; fi
-  lines=$(kubectl get sealedsecrets.bitnami.com -A -o json | jq -r '.items[]|select(([.status.conditions[]?|select(.type=="Synced" and .status=="True")]|length)==0)|"\(.metadata.namespace)/\(.metadata.name)"')
-  if [[ -z "$lines" ]]; then ok "every SealedSecret decrypted into a Secret"; else bad "SealedSecrets not decrypted: $(echo "$lines" | tr '\n' ' ')"; fi
+  echo " GitOps and secrets"
+  x=$(kubectl -n argocd get applications -o json | jq -r '.items[]|select(.status.sync.status!="Synced" or .status.health.status!="Healthy")|"\(.metadata.name)=\(.status.sync.status)/\(.status.health.status)"' | paste -sd' ')
+  if [[ -z "$x" ]]; then ok "all Argo apps Synced + Healthy"; else warn "Argo apps not green: $x"; fi
+  x=$(kubectl get sealedsecrets.bitnami.com -A -o json | jq -r '.items[]|select(([.status.conditions[]?|select(.type=="Synced" and .status=="True")]|length)==0)|"\(.metadata.namespace)/\(.metadata.name)"' | paste -sd' ')
+  if [[ -z "$x" ]]; then ok "every SealedSecret decrypted into a Secret"; else bad "SealedSecrets not decrypted: $x"; fi
+  if [[ -s "$TMP/n8n-secrets.json" ]]; then
+    if [[ "$(kubectl -n "$N8N_NS" get secret "$SECRET_NAME" -o jsonpath='{.data.N8N_ENCRYPTION_KEY}' 2>/dev/null)" == "$(jq -r '.data.N8N_ENCRYPTION_KEY' "$TMP/n8n-secrets.json")" ]]; then
+      ok "N8N_ENCRYPTION_KEY matches the Drive backup"; else bad "N8N_ENCRYPTION_KEY differs from the Drive backup"; fi
+  fi
 
   echo " pods"
-  lines=$(kubectl get pods -A -o json | jq -r '.items[]
-      | select((.status.phase!="Running" and .status.phase!="Succeeded") or (.status.phase=="Running" and ([.status.containerStatuses[]?|select(.ready==false)]|length>0)))
-      | "\(.metadata.namespace)/\(.metadata.name) \(.status.phase)"')
-  if [[ -z "$lines" ]]; then ok "all pods Running/Completed and Ready"
+  x=$(kubectl get pods -A -o json | jq -r '.items[]|select((.status.phase!="Running" and .status.phase!="Succeeded") or (.status.phase=="Running" and ([.status.containerStatuses[]?|select(.ready==false)]|length>0)))|"\(.metadata.namespace)/\(.metadata.name)"')
+  if [[ -z "$x" ]]; then ok "all pods Running/Completed and Ready"
   else
-    if echo "$lines" | grep -vq '^monitoring/'; then bad "pods not ready: $(echo "$lines" | grep -v '^monitoring/' | tr '\n' ';')"; fi
-    if echo "$lines" | grep -q '^monitoring/'; then warn "monitoring pods still starting (not critical): $(echo "$lines" | grep '^monitoring/' | wc -l | tr -d ' ') pod(s)"; fi
+    if grep -qv '^monitoring/' <<<"$x"; then bad "pods not ready: $(grep -v '^monitoring/' <<<"$x" | paste -sd' ')"; fi
+    if grep -q '^monitoring/' <<<"$x"; then warn "$(grep -c '^monitoring/' <<<"$x") monitoring pod(s) still starting (not critical)"; fi
   fi
 
   echo " Postgres"
-  inst=$(kubectl -n "$CLUSTER_NS" get cluster "$CLUSTER_NAME" -o jsonpath='{.spec.instances}')
-  ready=$(kubectl -n "$CLUSTER_NS" get cluster "$CLUSTER_NAME" -o jsonpath='{.status.readyInstances}')
-  if [[ "$ready" == "$inst" ]]; then ok "$ready/$inst instances ready (primary: $(primary_pod "$CLUSTER_NS" "$CLUSTER_NAME"))"; else bad "only ${ready:-0}/$inst instances ready"; fi
-  n=$(psql_q "$CLUSTER_NS" "$CLUSTER_NAME" postgres "select count(*) from pg_stat_replication where state='streaming'" 2>/dev/null || echo 0)
+  inst=$(kubectl -n "$CLNS" get cluster "$CL" -o jsonpath='{.spec.instances}')
+  ready=$(kubectl -n "$CLNS" get cluster "$CL" -o jsonpath='{.status.readyInstances}')
+  if [[ "$ready" == "$inst" ]]; then ok "$ready/$inst instances ready (primary: $(primary))"; else bad "only ${ready:-0}/$inst instances ready"; fi
+  n=$(psql_q postgres "select count(*) from pg_stat_replication where state='streaming'" 2>/dev/null || echo 0)
   if [[ "$n" -ge $((inst-1)) ]]; then ok "$n replica(s) streaming"; else bad "replication: $n streaming, expected $((inst-1))"; fi
-  p=$(kubectl -n "$CLUSTER_NS" get secret "${CLUSTER_NAME}-app" -o jsonpath='{.data.password}' 2>/dev/null | base64 --decode || true)
-  if [[ -n "$p" ]] && printf '%s' "$p" | kubectl -n "$CLUSTER_NS" exec -i "$(primary_pod "$CLUSTER_NS" "$CLUSTER_NAME")" -c postgres -- \
-       sh -c "IFS= read -r PGPASSWORD; export PGPASSWORD; psql -h ${CLUSTER_NAME}-rw -U $DB_OWNER -d $DB_NAME -tAc 'select 1'" >/dev/null 2>&1; then
-    ok "app user '$DB_OWNER' can log in through ${CLUSTER_NAME}-rw with the password in ${CLUSTER_NAME}-app (what n8n uses)"
-  else bad "app login failed: secret ${CLUSTER_NAME}-app missing or password wrong - n8n would not be able to connect"; fi
-  local wf cr last
-  wf=$(psql_q "$CLUSTER_NS" "$CLUSTER_NAME" "$DB_NAME" 'select count(*) from workflow_entity;' 2>/dev/null || echo "?")
-  cr=$(psql_q "$CLUSTER_NS" "$CLUSTER_NAME" "$DB_NAME" 'select count(*) from credentials_entity;' 2>/dev/null || echo "?")
-  last=$(psql_q "$CLUSTER_NS" "$CLUSTER_NAME" "$DB_NAME" 'select coalesce(max("startedAt")::text,'"'"'none'"'"') from execution_entity;' 2>/dev/null || echo "?")
-  if [[ "$wf" =~ ^[0-9]+$ && "$wf" -gt 0 ]]; then ok "data present: workflows=$wf credentials=$cr, newest execution=$last (compare with when the outage began = your data loss)"; else bad "no workflows found in $DB_NAME"; fi
+  p=$(kubectl -n "$CLNS" get secret "${CL}-app" -o jsonpath='{.data.password}' 2>/dev/null | base64 --decode || true)
+  if [[ -n "$p" ]] && printf '%s' "$p" | kubectl -n "$CLNS" exec -i "$(primary)" -c postgres -- \
+       sh -c "IFS= read -r PGPASSWORD; export PGPASSWORD; psql -h ${CL}-rw -U $OWNER -d $DB -tAc 'select 1'" >/dev/null 2>&1; then
+    ok "app user '$OWNER' can log in with the password in ${CL}-app"
+  else bad "app login failed: secret ${CL}-app missing or wrong password"; fi
+  if kubectl -n "$CLNS" get secret n8n-db-ca >/dev/null 2>&1; then ok "TLS CA secret n8n-db-ca exists (n8n verifies the database with it)"; else bad "secret n8n-db-ca is missing: n8n cannot verify the database"; fi
+  x=$(psql_q postgres "select count(*) filter (where s.ssl) || '|' || count(*) filter (where not s.ssl) from pg_stat_ssl s join pg_stat_activity a using(pid) where a.usename='$OWNER'" 2>/dev/null || echo "?")
+  if [[ "$x" =~ ^[0-9]+\|0$ && "${x%%|*}" -gt 0 ]]; then ok "connections of '$OWNER' use TLS ($x = tls|plain)"
+  elif [[ "$x" == "?" || "$x" == "0|0" ]]; then warn "no '$OWNER' connections yet to judge TLS"
+  else bad "plain-text connections of '$OWNER' exist ($x = tls|plain)"; fi
+  wf=$(psql_q "$DB" 'select count(*) from workflow_entity' 2>/dev/null || echo "?")
+  cr=$(psql_q "$DB" 'select count(*) from credentials_entity' 2>/dev/null || echo "?")
+  last=$(psql_q "$DB" "select coalesce(max(\"startedAt\")::text,'none') from execution_entity" 2>/dev/null || echo "?")
+  if [[ "$wf" =~ ^[0-9]+$ && "$wf" -gt 0 ]]; then ok "data present: workflows=$wf credentials=$cr newest execution=$last (compare with when the outage began = your data loss)"; else bad "no workflows found in $DB"; fi
 
-  echo " backups / archiving"
-  if [[ "$(kubectl -n "$CLUSTER_NS" get cluster "$CLUSTER_NAME" -o json | jq '(.spec.plugins // [])|length')" -gt 0 ]]; then
-    psql_q "$CLUSTER_NS" "$CLUSTER_NAME" postgres 'select pg_switch_wal()' >/dev/null 2>&1 || true; sleep 25
-    local arch; arch=$(psql_q "$CLUSTER_NS" "$CLUSTER_NAME" postgres 'select coalesce(failed_count,0)||'"'|'"'||(last_archived_time is not null) from pg_stat_archiver' 2>/dev/null || echo "?")
-    if [[ "$arch" == "0|t" ]]; then ok "WAL archiving works (archived at least one file, 0 failures)"; else bad "WAL archiving problem (failed|archived = $arch). See: kubectl -n $CLUSTER_NS logs <primary> -c plugin-barman-cloud"; fi
-    n=$(kubectl -n "$CLUSTER_NS" get backups.postgresql.cnpg.io -o json | jq '[.items[]|select(.status.phase=="completed")]|length')
+  echo " backups"
+  if [[ "$(kubectl -n "$CLNS" get cluster "$CL" -o json | jq '(.spec.plugins // [])|length')" -gt 0 ]]; then
+    psql_q postgres 'select pg_switch_wal()' >/dev/null 2>&1 || true; sleep 25
+    x=$(psql_q postgres "select coalesce(failed_count,0)||'|'||(last_archived_time is not null) from pg_stat_archiver" 2>/dev/null || echo "?")
+    if [[ "$x" == "0|true" || "$x" == "0|t" ]]; then ok "WAL archiving works (archived a file, 0 failures)"; else bad "WAL archiving problem (failed|archived = $x): kubectl -n $CLNS logs $(primary) -c plugin-barman-cloud"; fi
+    n=$(kubectl -n "$CLNS" get backups.postgresql.cnpg.io -o json | jq '[.items[]|select(.status.phase=="completed")]|length')
     if [[ "$n" -ge 1 ]]; then ok "$n completed base backup(s) in the NEW archive"; else bad "no completed base backup yet: the new archive is not recoverable until one completes"; fi
-  else
-    ok "DRILL mode: this cluster is NOT archiving, so it cannot touch your production S3 archive"
-    if kubectl get scheduledbackups.postgresql.cnpg.io -A --no-headers 2>/dev/null | grep -q .; then warn "a ScheduledBackup exists in a DRILL cluster; delete it before handing over to Argo"; fi
-  fi
+  else ok "DRILL: this cluster is NOT archiving, so it cannot touch the production S3 archive"; fi
 
-  echo " Redis / autoscaling / n8n"
-  local rpw rpod
-  rpw=$(kubectl -n redis-ha get secret redis-cluster-auth -o jsonpath='{.data.redis-password}' 2>/dev/null | base64 --decode || true)
-  rpod=$(kubectl -n redis-ha get pods -o name 2>/dev/null | head -1)
-  if [[ -n "$rpod" && -n "$rpw" ]] && printf '%s' "$rpw" | kubectl -n redis-ha exec -i "$rpod" -- sh -c 'IFS= read -r REDISCLI_AUTH; export REDISCLI_AUTH; redis-cli cluster info' 2>/dev/null | grep -q 'cluster_state:ok'; then
-    ok "Redis cluster_state:ok"; else bad "Redis cluster is not healthy (or password secret missing)"; fi
-  lines=$(kubectl -n "$N8N_NS" get scaledobjects.keda.sh -o json 2>/dev/null | jq -r '.items[]|select(([.status.conditions[]?|select(.type=="Ready" and .status=="True")]|length)==0)|.metadata.name')
-  if [[ -z "$lines" ]]; then ok "KEDA ScaledObjects Ready"; else warn "KEDA ScaledObjects not Ready: $lines"; fi
-  lines=$(kubectl -n "$N8N_NS" get deploy -o json | jq -r '.items[]|select((.status.availableReplicas // 0) < (.spec.replicas // 1))|"\(.metadata.name) \(.status.availableReplicas // 0)/\(.spec.replicas)"')
-  if [[ -z "$lines" ]]; then ok "all n8n deployments have their replicas available"; else bad "deployments short of replicas: $(echo "$lines" | tr '\n' ';')"; fi
-  local svc port code
-  svc=$(kubectl -n "$N8N_NS" get svc -o name | grep -m1 nginx || true)
-  if [[ -n "$svc" ]]; then
-    port=$(kubectl -n "$N8N_NS" get "$svc" -o jsonpath='{.spec.ports[0].port}')
-    kubectl -n "$N8N_NS" port-forward "$svc" "18443:$port" >/dev/null 2>&1 & PF_PID=$!
-    sleep 5
-    code=$(curl -ks -o /dev/null -m 15 -w '%{http_code}' https://localhost:18443/healthz || true)
-    kill "$PF_PID" >/dev/null 2>&1 || true; PF_PID=""
-    if [[ "$code" == 200 ]]; then ok "n8n answers over HTTPS through the nginx proxy (/healthz = 200)"; else warn "n8n /healthz via the proxy returned HTTP ${code:-none}; check manually with the port-forward below"; fi
-  else warn "no nginx proxy service found to test"; fi
+  echo " Redis and autoscaling"
+  rpw=$(kubectl -n "$REDIS_NS" get secret redis-cluster-auth -o jsonpath='{.data.redis-password}' 2>/dev/null | base64 --decode || true)
+  rpod=$(kubectl -n "$REDIS_NS" get pods -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+  if [[ -n "$rpod" && -n "$rpw" ]] && printf '%s' "$rpw" | kubectl -n "$REDIS_NS" exec -i "$rpod" -- sh -c 'IFS= read -r REDISCLI_AUTH; export REDISCLI_AUTH; redis-cli cluster info' 2>/dev/null | grep -q 'cluster_state:ok'; then
+    ok "Redis cluster_state:ok"; else bad "Redis cluster not healthy (or password secret missing)"; fi
+  x=$(kubectl -n "$N8N_NS" get scaledobjects.keda.sh -o json 2>/dev/null | jq -r '.items[]|select(([.status.conditions[]?|select(.type=="Ready" and .status=="True")]|length)==0)|.metadata.name' | paste -sd' ')
+  if [[ -z "$x" ]]; then ok "KEDA ScaledObjects Ready"; else warn "KEDA ScaledObjects not Ready: $x"; fi
+
+  echo " n8n"
+  if kubectl -n argocd get application n8n >/dev/null 2>&1; then
+    x=$(kubectl -n "$N8N_NS" get deploy -o json | jq -r '.items[]|select((.status.availableReplicas // 0) < (.spec.replicas // 1))|"\(.metadata.name) \(.status.availableReplicas // 0)/\(.spec.replicas)"' | paste -sd';')
+    if [[ -z "$x" ]]; then ok "all n8n deployments have their replicas available"; else bad "deployments short of replicas: $x"; fi
+    if kubectl -n "$N8N_NS" get svc nginx-proxy >/dev/null 2>&1; then
+      pf_start "$N8N_NS" svc/nginx-proxy 18443 443
+      code=$(curl -ks -o /dev/null -m 15 -w '%{http_code}' https://localhost:18443/healthz || true)
+      if [[ "$code" == 200 ]]; then ok "n8n answers over HTTPS through the nginx proxy (/healthz = 200)"; else bad "/healthz via the proxy returned HTTP ${code:-none}"; fi
+      code=$(curl -ks -o /dev/null -m 15 -w '%{http_code}' https://localhost:18443/healthz/readiness || true)
+      if [[ "$code" == 200 ]]; then ok "n8n is ready: it reaches Postgres over TLS (/healthz/readiness = 200)"; else bad "/healthz/readiness returned HTTP ${code:-none} (database connection problem?)"; fi
+      code=$(curl -ks -o /dev/null -m 15 -w '%{http_code}' https://localhost:18443/metrics || true)
+      if [[ "$code" == 404 ]]; then ok "/metrics is blocked at the proxy"; else warn "/metrics via the proxy returned HTTP ${code:-none} (expected 404)"; fi
+      pf_stop
+    else warn "no nginx-proxy service found"; fi
+  else warn "n8n Argo app not installed (START_N8N=0?): n8n checks skipped"; fi
+
+  echo " security and monitoring"
+  n=$(kubectl -n "$N8N_NS" get networkpolicy --no-headers 2>/dev/null | wc -l | tr -d ' ')
+  if [[ "$n" -ge 5 ]]; then ok "$n NetworkPolicies in $N8N_NS"; else bad "only $n NetworkPolicies in $N8N_NS (expected the full set)"; fi
+  if kubectl -n monitoring get prometheusrule n8n-backup-alerts >/dev/null 2>&1; then ok "alert rules n8n-backup-alerts are loaded"; else bad "PrometheusRule n8n-backup-alerts is missing"; fi
+  if kubectl -n monitoring get svc prometheus-kube-prometheus-prometheus >/dev/null 2>&1; then
+    pf_start monitoring svc/prometheus-kube-prometheus-prometheus 19090 9090
+    x="?"; n=0
+    while (( n < 12 )); do
+      x=$(curl -s -m 10 -G --data-urlencode 'query=count(up{namespace="n8n"}==0) or vector(0)' http://localhost:19090/api/v1/query | jq -r '.data.result[0].value[1] // "?"' 2>/dev/null || echo "?")
+      if [[ "$x" == 0 ]]; then break; fi
+      n=$((n+1)); sleep 10
+    done
+    pf_stop
+    if [[ "$x" == 0 ]]; then ok "Prometheus scrapes every n8n target (none down)"; else warn "Prometheus reports $x n8n target(s) down or unknown (give it a few minutes)"; fi
+  else warn "Prometheus service not found"; fi
+  if [[ -z "$ALERTMANAGER_VALUES" ]]; then warn "Alertmanager has no receiver: alerts will not reach you"; fi
 
   step "post-DR summary: $PASS passed, $WARN warnings, $FAIL failed"
   cat <<EOF
 
  Checks the script cannot do for you (2 minutes):
-   1. kubectl -n $N8N_NS port-forward svc/nginx-proxy 8443:443   ->  open https://localhost:8443  and log in
+   1. kubectl -n $N8N_NS port-forward svc/nginx-proxy 8443:443   then open https://localhost:8443 and log in
    2. open a credential and run a workflow that uses it  (proves the encryption key works)
-   3. confirm workers pick up executions (run a workflow, watch it finish)
+   3. run a workflow and watch a worker pick it up and finish
 EOF
 }
 
@@ -547,93 +677,41 @@ handover_notes() {
   if [[ "$MODE" == real ]]; then cat <<EOF
 
 ${B}REAL mode: what is left to do by hand${N}
- The new cluster archives to a NEW folder in the same bucket:  serverName = $NEW_SERVER
- Argo's 'n8n-base' app is intentionally NOT started yet (it would fight the restored Cluster). To hand over to GitOps:
-   1. In deploy/base/postgres-cluster.yaml set under spec.plugins[].parameters:   serverName: $NEW_SERVER
-   2. In argocd/apps/n8n-base.yaml add, so Argo never re-applies creation-time fields:
+ The new cluster archives to a NEW folder in the same bucket:  serverName = ${NEW_SERVER:-see the Cluster}
+ Argo's 'n8n-base' runs without the Postgres Cluster (it would fight the restored one). To hand over to GitOps:
+   1. In deploy/base/postgres-cluster.yaml set under spec.plugins[].parameters:   serverName: ${NEW_SERVER:-<new folder>}
+   2. In argocd/apps/n8n-base.yaml add (so Argo never re-applies creation-time fields):
         ignoreDifferences:
           - group: postgresql.cnpg.io
             kind: Cluster
             jsonPointers: [/spec/bootstrap, /spec/externalClusters]
-        (and add  RespectIgnoreDifferences=true  to syncOptions)
-   3. git commit + push, then:   kubectl apply -f bootstrap/root.yaml   (use https:// repoURLs or register an SSH key first)
-   4. keep a copy of these values: the old archive folder is '$SOURCE_SERVER', the new one is '$NEW_SERVER'
+      and add RespectIgnoreDifferences=true to syncOptions
+   3. git commit + push, then:   kubectl apply -f bootstrap/root.yaml
+   4. keep a note: the old archive folder is '${SRC:-?}', the new one is '${NEW_SERVER:-?}'
+      (next time: SOURCE_SERVER=<newest folder> ./ops/dr-up.sh)
 EOF
   else cat <<EOF
 
 ${B}DRILL mode: finished${N}
- This cluster does NOT archive to S3 and 'n8n-base'/'root' were NOT applied, so nothing can write to your production archive.
- Tear it down when done. To run the same thing for real:   ./dr-up.sh --real
+ This cluster does NOT archive to S3, and the 'root' app and the Postgres Cluster from git were NOT applied,
+ so nothing here can write to your production archive. Delete the cluster (or run ./ops/dr-up.sh clean) when done.
+ To run it for real:   ./ops/dr-up.sh --real
 EOF
   fi
 }
 
-# =============================================================================
-#  READINESS  (run against production: "if the building burned down tonight, could we rebuild?")
-# =============================================================================
-readiness() {
-  step "DR READINESS of the CURRENT cluster: $(kubectl config current-context)"
-  local t; for t in kubectl jq rclone; do has "$t" || die "$t is required"; done
-  load_cluster_info
-  local inst ready row age_s failed lf bk_age n
-
-  inst=$(kubectl -n "$CLUSTER_NS" get cluster "$CLUSTER_NAME" -o jsonpath='{.spec.instances}')
-  ready=$(kubectl -n "$CLUSTER_NS" get cluster "$CLUSTER_NAME" -o jsonpath='{.status.readyInstances}')
-  if [[ "$ready" == "$inst" ]]; then ok "Postgres healthy ($ready/$inst)"; else bad "Postgres has only ${ready:-0}/$inst instances ready"; fi
-
-  row=$(psql_q "$CLUSTER_NS" "$CLUSTER_NAME" postgres "select coalesce(extract(epoch from now()-last_archived_time)::int,-1)||'|'||coalesce(failed_count,0)||'|'||coalesce(extract(epoch from now()-last_failed_time)::int,-1) from pg_stat_archiver" 2>/dev/null || echo "")
-  if [[ -z "$row" ]]; then bad "could not read pg_stat_archiver"
-  else
-    age_s=${row%%|*}; failed=$(echo "$row" | cut -d'|' -f2); lf=${row##*|}
-    if [[ "$age_s" == -1 ]]; then bad "WAL has NEVER been archived"
-    elif [[ "$lf" != -1 && "$lf" -lt "$age_s" ]]; then bad "WAL archiving is FAILING right now (last failure ${lf}s ago, last success ${age_s}s ago)"
-    elif [[ "$age_s" -gt 1800 ]]; then warn "newest archived WAL is $((age_s/60)) min old (idle database?)"
-    else ok "WAL archiving healthy (newest file archived ${age_s}s ago, $failed historical failures)"; fi
-  fi
-
-  bk_age=$(kubectl -n "$CLUSTER_NS" get backups.postgresql.cnpg.io -o json | jq -r '[.items[]|select(.status.phase=="completed")|.status.stoppedAt|sub("\\.[0-9]+";"")|fromdateiso8601]|max // 0|((now-.)/3600|floor)')
-  if [[ "$bk_age" -lt 36 ]]; then ok "newest completed base backup is ${bk_age}h old"; else bad "newest completed base backup is ${bk_age}h old (limit 36h)"; fi
-
-  if s3_probe "$CLUSTER_NS" "$OBJECTSTORE" "$SOURCE_SERVER"; then ok "S3 archive readable: base backups and WAL present"; else bad "S3 archive probe failed: $(echo "$S3_PROBE_LOG" | tail -2 | tr '\n' ' ')"; fi
-
-  DRIVE_LIST=$(rclone lsf "$GDRIVE_PATH/" 2>/dev/null || true)
-  [[ -n "$DRIVE_LIST" ]] && ok "Google Drive reachable" || bad "cannot list $GDRIVE_PATH"
-  local kf sf
-  kf=$(printf '%s\n' "$DRIVE_LIST" | grep -E '^sealing-keys-[0-9]{8}\.json\.age$' | sort | tail -1 || true)
-  sf=$(printf '%s\n' "$DRIVE_LIST" | grep -E '^n8n-secrets-[0-9]{8}\.json\.age$' | sort | tail -1 || true)
-  if [[ -n "$AGE_IDENTITY" && -r "$AGE_IDENTITY" && -n "$kf" && -n "$sf" ]] && has age; then
-    rclone copyto "$GDRIVE_PATH/$kf" "$TMP/k.age" && age -d -i "$AGE_IDENTITY" -o "$TMP/k.json" "$TMP/k.age"
-    rclone copyto "$GDRIVE_PATH/$sf" "$TMP/s.age" && age -d -i "$AGE_IDENTITY" -o "$TMP/s.json" "$TMP/s.age"
-    local missing
-    missing=$(comm -23 <(kubectl -n kube-system get secret -l sealedsecrets.bitnami.com/sealed-secrets-key -o json | jq -r '.items[].metadata.name' | sort) \
-                       <(jq -r '.items[].metadata.name' "$TMP/k.json" | sort))
-    if [[ -z "$missing" ]]; then ok "$kf contains every current sealing key"; else bad "$kf is MISSING current sealing key(s): $(echo "$missing" | tr '\n' ' ') -> run ops/keys-backup.sh now"; fi
-    if [[ "$(kubectl -n "$N8N_NS" get secret "$N8N_SECRET_NAME" -o jsonpath='{.data.N8N_ENCRYPTION_KEY}')" == "$(jq -r '.data.N8N_ENCRYPTION_KEY' "$TMP/s.json")" ]]; then
-      ok "$sf matches the live N8N_ENCRYPTION_KEY"; else bad "$sf does NOT match the live N8N_ENCRYPTION_KEY -> run ops/keys-backup.sh now"; fi
-  else warn "set AGE_IDENTITY (and have both backups on Drive) to verify the key backups' CONTENT, not just their existence"; fi
-
-  # record the versions of everything that is NOT in git, so a rebuild can install the same ones
-  local av sv pv out="$REPO_DIR/ops/dr-versions.env"
-  av=$(kubectl -n argocd get deploy argocd-server -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null | sed 's/.*://' || true)
-  sv=$(helm list -A -o json 2>/dev/null | jq -r '.[]|select(.chart|startswith("sealed-secrets-"))|.chart' | head -1 | sed 's/^sealed-secrets-//' || true)
-  pv=$(helm list -A -o json 2>/dev/null | jq -r '.[]|select(.chart|startswith("kube-prometheus-stack-"))|.chart' | head -1 | sed 's/^kube-prometheus-stack-//' || true)
-  { echo "# written by 'dr-up.sh readiness' on $(date -u +%FT%TZ) - commit this file; dr-up.sh sources it"
-    echo ": \"\${ARGOCD_VERSION:=$av}\""; echo ": \"\${SEALED_SECRETS_CHART_VERSION:=$sv}\""; echo ": \"\${PROM_STACK_CHART_VERSION:=$pv}\""; } > "$out"
-  log "wrote $out  (argocd=${av:-?} sealed-secrets=${sv:-?} kube-prometheus-stack=${pv:-?}) -> git add/commit/push it"
-  [[ -n "$av" && -n "$sv" && -n "$pv" ]] || warn "some versions could not be detected (not installed via helm?). Edit $out by hand."
-
-  step "readiness summary: $PASS passed, $WARN warnings, $FAIL failed"
-  [[ "$FAIL" -eq 0 ]] || { echo "${R}NOT DR-READY${N}: fix the FAIL lines."; return 1; }
-  echo "${G}DR-ready${N} (as far as these checks can tell: the only real proof is a drill restore)."
-}
-
 # ----------------------------------- main ------------------------------------
-ensure_repo
 case "$CMD" in
-  readiness) readiness ;;
-  preflight) pre_dr_checks ;;
-  verify)    load_cluster_info; post_dr_checks ;;
-  up)        pre_dr_checks; build; post_dr_checks; handover_notes
-             echo; echo "total time: $(( (SECONDS-T0)/60 )) min"
-             [[ "$FAIL" -eq 0 ]] || exit 1 ;;
+  preflight) preflight ;;
+  clean)     clean ;;
+  verify)    post_checks ;;
+  up)
+    T0=$SECONDS
+    preflight
+    confirm "This will INSTALL the full platform into that cluster."
+    step_sealed_secrets; step_argocd; step_monitoring; step_platform; step_base
+    step_database; step_apps; step_real_backup
+    post_checks; handover_notes
+    echo; echo "total time: $(( (SECONDS-T0)/60 )) min"
+    if (( FAIL > 0 )); then exit 1; fi ;;
 esac
