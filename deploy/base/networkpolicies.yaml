@@ -33,9 +33,6 @@ spec:
               kubernetes.io/metadata.name: cnpg-system
         - podSelector:
             matchLabels:
-              app: pg-backup
-        - podSelector:
-            matchLabels:
               app: pg-restore
         - podSelector:
             matchLabels:
