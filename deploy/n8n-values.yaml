@@ -24,7 +24,7 @@ hpa:
     maxReplicas: 4
     targetCPUUtilizationPercentage: 70
   webhookProcessor:
-    enabled: false
+    enabled: true
     minReplicas: 2
     maxReplicas: 3
     targetCPUUtilizationPercentage: 60
@@ -89,8 +89,6 @@ executions:
 config:
   extraEnv:
     - name: N8N_METRICS
-      value: "true"
-    - name: N8N_METRICS_INCLUDE_API_ENDPOINTS
       value: "true"
     - name: N8N_METRICS_INCLUDE_QUEUE_METRICS
       value: "true"
