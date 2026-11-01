@@ -36,37 +36,9 @@ n8n runs in **queue mode**. The work is split across three roles that scale inde
 | **Webhook processors** | Handle production webhook calls (`/webhook/*`) and enqueue executions | HPA on CPU, 2 to 3 replicas |
 | **Workers** | Pull executions from the Redis queue and run them. Each worker has an isolated task-runner sidecar for Code nodes | KEDA on queue depth, 2 to 4 replicas |
 
-```mermaid
-flowchart LR
-    client([Client / webhook caller])
 
-    subgraph n8n_ns[namespace: n8n]
-        proxy[nginx-proxy<br/>TLS termination<br/>webhook rate limiting]
-        main[n8n main<br/>UI, API, triggers]
-        webhook[n8n webhook processors<br/>HPA 2-3]
-        worker[n8n workers + task runners<br/>KEDA 2-4]
-        pooler[PgBouncer pooler]
-        pg[(PostgreSQL<br/>CloudNativePG<br/>primary + replica)]
-    end
+<img width="1220" height="730" alt="image" src="https://github.com/user-attachments/assets/6eec91dd-5228-4b33-b706-f525dfea6ef8" />
 
-    subgraph redis_ns[namespace: redis-ha]
-        redis[(Redis Cluster<br/>3 primaries + 3 replicas)]
-    end
-
-    s3[(S3 bucket<br/>WAL archive and<br/>base backups)]
-
-    client -->|HTTPS| proxy
-    proxy -->|"/webhook/*"| webhook
-    proxy -->|everything else| main
-    main -->|enqueue| redis
-    webhook -->|enqueue| redis
-    redis -->|jobs| worker
-    main --> pooler
-    webhook --> pooler
-    worker --> pooler
-    pooler -->|TLS, CA-verified| pg
-    pg -->|continuous WAL + daily base backup| s3
-```
 
 ### Request flow
 
