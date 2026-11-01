@@ -20,24 +20,23 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # 1. Lint YAML files, including the workflow itself
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
       - name: Lint YAML
         run: |
           python -m pip install yamllint
-          yamllint -d relaxed \
-            .github/workflows deploy/base argocd bootstrap \
-            deploy/n8n-values.yaml
+          yamllint -c .yamllint.yaml \
+            .github/workflows deploy argocd bootstrap ops .yamllint.yaml
 
       # 2. Install Helm
       - name: Install Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@v5
         with:
           version: v3.18.6
 
@@ -49,10 +48,14 @@ jobs:
             | tar xz
           sudo mv kubeconform /usr/local/bin/
 
-      # 4. Validate plain Kubernetes manifests
+      # 4. Validate plain Kubernetes manifests. Custom resources (CNPG, Argo CD,
+      #    KEDA, Prometheus Operator, Sealed Secrets, VPA) are checked against
+      #    the community CRDs-catalog schemas.
       - name: Validate plain manifests
         run: |
           kubeconform -strict -ignore-missing-schemas -summary \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
             deploy/base argocd bootstrap ops
 
       # 5. Lint the n8n Helm chart and its values
@@ -144,9 +147,9 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -158,7 +161,7 @@ jobs:
             | tar xz
           sudo mv kubeconform /usr/local/bin/
 
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
         with:
           version: v3.18.6
 
@@ -209,7 +212,7 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
