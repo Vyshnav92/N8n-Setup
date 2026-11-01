@@ -1,3 +1,5 @@
+# metrics-server: CPU and memory metrics for the webhook-processor HPA.
+# --kubelet-insecure-tls is for local clusters only (see docs/production-readiness.md, P2-7).
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

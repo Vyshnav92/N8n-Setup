@@ -1,4 +1,4 @@
-
+# Service account for ops/pg-restore-job.yaml (no Kubernetes API access).
 apiVersion: v1
 kind: ServiceAccount
 metadata:

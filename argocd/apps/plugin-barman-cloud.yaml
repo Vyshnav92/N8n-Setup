@@ -1,3 +1,4 @@
+# Barman Cloud plugin for CloudNativePG: WAL archiving and base backups to S3.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

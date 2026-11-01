@@ -1,3 +1,4 @@
+# S3 destination for PostgreSQL WAL archiving and base backups (Barman Cloud plugin).
 apiVersion: barmancloud.cnpg.io/v1
 kind: ObjectStore
 metadata:

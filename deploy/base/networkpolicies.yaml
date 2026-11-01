@@ -29,7 +29,6 @@ spec:
               cnpg.io/cluster: n8n-db
         - namespaceSelector:
             matchLabels:
-
               kubernetes.io/metadata.name: cnpg-system
         - podSelector:
             matchLabels:
