@@ -1,3 +1,4 @@
+# cert-manager: required by the Barman Cloud plugin for its internal mTLS certificates.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

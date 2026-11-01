@@ -1,3 +1,4 @@
+# KEDA: scales n8n workers on the length of the Redis queue.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

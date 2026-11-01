@@ -1,3 +1,4 @@
+# Credentials KEDA uses to read the queue length from Redis.
 apiVersion: keda.sh/v1alpha1
 kind: TriggerAuthentication
 metadata:

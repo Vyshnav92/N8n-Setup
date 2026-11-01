@@ -1,3 +1,5 @@
+# Plain manifests in deploy/base: database, proxy, network policies, monitoring,
+# PDBs and sealed secrets.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

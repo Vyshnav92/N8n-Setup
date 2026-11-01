@@ -1,3 +1,4 @@
+# CloudNativePG operator: manages the PostgreSQL cluster and PgBouncer pooler in deploy/base.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

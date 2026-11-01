@@ -1,3 +1,4 @@
+# n8n namespace, labelled for the restricted Pod Security profile (warn + audit).
 apiVersion: v1
 kind: Namespace
 metadata:

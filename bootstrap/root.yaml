@@ -1,3 +1,5 @@
+# Root Argo CD Application (app of apps). Applying this one file installs
+# every Application in argocd/apps/, which in turn installs the platform.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

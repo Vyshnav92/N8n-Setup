@@ -1,3 +1,4 @@
+# PgBouncer in front of PostgreSQL. n8n connects to n8n-db-pooler-rw.
 apiVersion: postgresql.cnpg.io/v1
 kind: Pooler
 metadata:

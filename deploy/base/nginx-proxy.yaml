@@ -1,3 +1,5 @@
+# Reverse proxy in front of n8n: TLS termination, HTTP->HTTPS redirect,
+# webhook routing and rate limiting. /metrics is not exposed.
 apiVersion: v1
 kind: ConfigMap
 metadata:

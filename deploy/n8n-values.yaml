@@ -1,3 +1,5 @@
+# Values for the official n8n Helm chart (version pinned in argocd/apps/n8n.yaml).
+# Chart defaults: helm show values oci://ghcr.io/n8n-io/n8n-helm-chart/n8n --version 1.15.0
 queueMode:
   enabled: true
   workerReplicaCount: 3
@@ -28,7 +30,6 @@ hpa:
     minReplicas: 2
     maxReplicas: 3
     targetCPUUtilizationPercentage: 60
-
 
 database:
   useExternal: true
@@ -146,6 +147,8 @@ taskRunners:
 
   image:
     repository: n8nio/runners
+    # Must match the n8n version of the chart (appVersion 2.42.4 for chart 1.15.0).
+    # Bump it together with targetRevision in argocd/apps/n8n.yaml.
     tag: "2.42.4-distroless"
 
   authToken:
