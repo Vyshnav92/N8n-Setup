@@ -6,7 +6,7 @@ A highly available, self-hosted [n8n](https://n8n.io) workflow-automation platfo
 
 The repository covers the full lifecycle: install, scaling, security hardening, monitoring and alerting, point-in-time database recovery, and a scripted rebuild of the whole platform on an empty cluster.
 
-> **Status: proof of concept.** The architecture is complete and runs end to end. The changes still needed before production use are listed in [docs/production-readiness.md](docs/production-readiness.md).
+> **Status: proof of concept.** 
 
 ---
 
@@ -309,6 +309,6 @@ Prometheus Operator resources live in `deploy/base/`:
 
 | Document | Purpose |
 |---|---|
-| [docs/production-readiness.md](docs/production-readiness.md) | Review of every manifest against production criteria, with prioritised next steps |
+|  |
 | [docs/disaster-recovery.md](docs/disaster-recovery.md) | Backup design and the step-by-step recovery runbook |
 | [docs/operations.md](docs/operations.md) | Day-2 tasks: sealing secrets, upgrades, scaling, useful commands |
