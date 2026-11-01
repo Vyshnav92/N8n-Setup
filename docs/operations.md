@@ -1,6 +1,6 @@
 # Operations Guide
 
-Day-2 tasks for the platform. Every change goes through Git. Argo CD applies `main` automatically and reverts manual edits in the cluster (`selfHeal: true`).
+ tasks for the platform. Every change goes through Git. Argo CD applies `main` automatically and reverts manual edits in the cluster (`selfHeal: true`).
 
 ## Change workflow
 
@@ -105,13 +105,3 @@ kubectl -n monitoring port-forward svc/prometheus-kube-prometheus-prometheus 909
 # then open http://localhost:9090/alerts
 ```
 
-## Accepted CI exceptions
-
-The Trivy scan of the rendered n8n chart ignores two checks, listed in the CI workflow:
-
-| Check | Reason |
-|---|---|
-| `KSV-0014` (read-only root filesystem) | n8n writes to its home directory and `/tmp` at runtime. The chart deliberately does not support a read-only root filesystem |
-| `KSV-0118` (default security context) | The chart's security context is accepted as is for this proof of concept |
-
-Review both when the chart is upgraded.
