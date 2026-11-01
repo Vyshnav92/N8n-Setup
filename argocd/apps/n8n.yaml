@@ -1,3 +1,5 @@
+# n8n itself: the official Helm chart with values from deploy/n8n-values.yaml.
+# Replica counts are ignored so that HPA and KEDA own them.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -24,7 +26,6 @@ spec:
       kind: Deployment
       jsonPointers:
         - /spec/replicas
-
   syncPolicy:
     automated:
       selfHeal: true

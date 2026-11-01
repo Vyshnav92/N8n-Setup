@@ -1,3 +1,5 @@
+# Redis Cluster (3 primaries + 3 replicas): the n8n execution queue.
+# Only n8n, KEDA and the cluster members may connect (NetworkPolicy below).
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

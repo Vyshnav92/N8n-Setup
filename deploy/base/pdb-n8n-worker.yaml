@@ -1,3 +1,4 @@
+# Keeps workers available during voluntary disruptions (node drains).
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
