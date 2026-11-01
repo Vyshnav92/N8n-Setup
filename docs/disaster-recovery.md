@@ -131,13 +131,6 @@ AGE_IDENTITY=~/age-key.txt ./ops/keys-restore.sh sealing-keys-20261024.json.age 
 DRY_RUN=1 AGE_IDENTITY=~/age-key.txt ./ops/keys-restore.sh                          # validate only
 ```
 
-### Restore a logical dump (legacy)
-
-`ops/pg-restore-job.yaml` restores the newest `pg_dump` archive from the `n8n-backup-v1` bucket. It refuses to overwrite a database that already contains workflows unless `ALLOW_OVERWRITE` is set to `"true"`.
-
-> The CronJob that produced these dumps has been removed, so the newest dump may be old. Prefer point-in-time recovery. See P2-4 in [production-readiness.md](production-readiness.md).
-
----
 
 ## Recommended drill cadence
 

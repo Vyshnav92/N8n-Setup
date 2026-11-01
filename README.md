@@ -151,7 +151,6 @@ Versions used to rebuild the cluster live in [`dr/versions.env`](dr/versions.env
 │   ├── dr-up.sh                # rebuild the platform on an empty cluster
 │   ├── keys-backup.sh          # back up the sealing keys and the n8n encryption key
 │   ├── keys-restore.sh         # restore the sealing keys
-│   └── pg-restore-job.yaml     # restore a logical pg_dump (legacy path)
 ├── dr/
 │   └── versions.env            # pinned versions used during rebuild
 ├── docs/                       # runbooks and the production-readiness review
@@ -232,7 +231,6 @@ No plaintext secret is ever committed. Every credential is a [Sealed Secret](htt
 | `redis-cluster-auth` | n8n, redis-ha | Redis password for n8n, KEDA and Redis itself |
 | `nginx-tls` | n8n | TLS certificate for the proxy |
 | `pg-wal-s3` | n8n | S3 credentials for WAL archiving and base backups |
-| `s3-backup` | n8n | S3 credentials for the legacy logical-dump restore job |
 
 CloudNativePG generates the database credentials (`n8n-db-app`) and the CA (`n8n-db-ca`) itself. They are not stored in Git.
 
