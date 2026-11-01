@@ -1,3 +1,24 @@
+# Local Helm values that hold real addresses or credentials (never commit)
 alertmanager-values.yaml
-*.tgz
 old-values.yaml
+
+# Disaster-recovery inputs: keep these outside the repository
+age-key.txt
+rclone.conf
+*.age
+dr.log
+
+# Helm and CI artefacts
+*.tgz
+rendered.yaml
+rendered.trivyignore
+
+# Unsealed secrets created while running kubeseal
+*-unsealed.yaml
+secret-*.yaml
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
