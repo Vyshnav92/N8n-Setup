@@ -69,7 +69,7 @@ metadata:
   name: nginx-proxy
   namespace: n8n
 spec:
-  replicas: 1
+  replics: 1
   selector:
     matchLabels:
       app: nginx-proxy
